@@ -31,10 +31,7 @@
 "remote_bookmarks" = "magenta"
 "tag" = "magenta"
 "tags" = "magenta"
-# TODO: remove git_refs and git_head (but not git_ref) in jj 0.43+
 "git_ref" = "green"
-"git_refs" = "green"
-"git_head" = "green"
 "divergent" = "magenta"
 "mutable divergent" = "red"
 "mutable divergent change_id" = "red"
@@ -63,7 +60,6 @@
 "working_copy tag" = "bright magenta"
 "working_copy tags" = "bright magenta"
 "working_copy git_ref" = "bright green"
-"working_copy git_refs" = "bright green"
 "working_copy divergent" = "bright magenta"
 "working_copy mutable divergent" = "bright red"
 "working_copy mutable divergent change_id" = "bright red"
@@ -101,12 +97,12 @@
 "operation id" = "blue"
 "operation user" = "yellow"
 "operation time" = "cyan"
-"operation tags" = "magenta"
+"operation attributes" = "magenta"
 "operation current_operation" = { bold = true }
 "operation current_operation id" = "bright blue"
 "operation current_operation user" = "yellow"                    # No bright yellow, see comment above
 "operation current_operation time" = "bright cyan"
-"operation current_operation tags" = "bright magenta"
+"operation current_operation attributes" = "bright magenta"
 
 "node elided" = { fg = "bright black" }
 "node working_copy" = { fg = "green", bold = true }

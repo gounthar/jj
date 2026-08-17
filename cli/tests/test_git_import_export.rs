@@ -22,6 +22,34 @@ use crate::common::TestEnvironment;
 use crate::common::TestWorkDir;
 
 #[test]
+fn test_git_export_basic() {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    work_dir
+        .run_jj(["bookmark", "create", "-r@", "main"])
+        .success();
+
+    let output = work_dir.run_jj(["git", "export", "--no-integrate-operation"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: --no-integrate-operation is not respected
+    [EOF]
+    [exit status: 2]
+    ");
+
+    let output = work_dir.run_jj(["git", "export"]);
+    insta::assert_snapshot!(output, @"");
+    insta::assert_snapshot!(work_dir.run_jj(["log", "-rmain@git"]), @"
+    @  qpvuntsm test.user@example.com 2001-02-03 08:05:07 main e8849ae1
+    │  (empty) (no description set)
+    ~
+    [EOF]
+    ");
+}
+
+#[test]
 fn test_resolution_of_git_tracking_bookmarks() -> TestResult {
     let test_env = TestEnvironment::default();
     test_env.run_jj_in(".", ["git", "init", "repo"]).success();
@@ -121,8 +149,8 @@ fn test_git_export_undo() -> TestResult {
     let output = work_dir.run_jj(["undo"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Undid operation: 563b0274c404 (2001-02-03 08:05:10) export git refs
-    Restored to operation: a8cc177d3fa6 (2001-02-03 08:05:08) create bookmark a pointing to commit e8849ae12c709f2321908879bc724fdb2ab8a781
+    Undid operation: 29447db431a3 (2001-02-03 08:05:10) export git refs
+    Restored to operation: 5142cb3d7c38 (2001-02-03 08:05:08) create bookmark a pointing to commit e8849ae12c709f2321908879bc724fdb2ab8a781
     [EOF]
     ");
     insta::assert_debug_snapshot!(get_git_repo_refs(&git_repo), @r#"
@@ -196,7 +224,7 @@ fn test_git_import_undo() -> TestResult {
     let output = work_dir.run_jj(["op", "restore", &base_operation_id]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Restored to operation: 90267f31f904 (2001-02-03 08:05:07) add workspace 'default'
+    Restored to operation: f63ee16f9553 (2001-02-03 08:05:07) add workspace 'default'
     [EOF]
     ");
     insta::assert_snapshot!(get_bookmark_output(&work_dir), @"");
@@ -277,7 +305,7 @@ fn test_git_import_move_export_with_default_undo() -> TestResult {
     let output = work_dir.run_jj(["op", "restore", &base_operation_id]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Restored to operation: 90267f31f904 (2001-02-03 08:05:07) add workspace 'default'
+    Restored to operation: f63ee16f9553 (2001-02-03 08:05:07) add workspace 'default'
     Working copy  (@) now at: qpvuntsm e8849ae1 (empty) (no description set)
     Parent commit (@-)      : zzzzzzzz 00000000 (empty) (no description set)
     [EOF]
@@ -358,7 +386,7 @@ fn test_git_import_export_stats_color() -> TestResult {
     ------- stderr -------
     bookmark: [38;5;5mbar@git[39m [new] tracked
     bookmark: [38;5;5mfoo@git[39m [updated] tracked
-    tag: [38;5;5mbaz@git[39m [new] 
+    tag: [38;5;5mbaz@git[39m [new] tracked
     [EOF]
     ");
     Ok(())

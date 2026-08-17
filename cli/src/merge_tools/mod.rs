@@ -21,6 +21,7 @@ use std::sync::Arc;
 use futures::future::try_join_all;
 use jj_lib::backend::BackendError;
 use jj_lib::backend::CopyId;
+use jj_lib::backend::MergedTreeValue;
 use jj_lib::backend::TreeValue;
 use jj_lib::config::ConfigGetError;
 use jj_lib::config::ConfigGetResultExt as _;
@@ -32,7 +33,6 @@ use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::Matcher;
 use jj_lib::merge::Diff;
 use jj_lib::merge::Merge;
-use jj_lib::merge::MergedTreeValue;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::repo_path::InvalidRepoPathError;
@@ -542,6 +542,7 @@ mod tests {
                     "$left",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [],
                 merge_conflict_exit_codes: [],
                 merge_tool_edits_conflict_markers: false,
@@ -575,6 +576,7 @@ mod tests {
                     "$left",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [],
                 merge_conflict_exit_codes: [],
                 merge_tool_edits_conflict_markers: false,
@@ -620,6 +622,7 @@ mod tests {
                     "$left",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [],
                 merge_conflict_exit_codes: [],
                 merge_tool_edits_conflict_markers: false,
@@ -649,6 +652,7 @@ mod tests {
                     "-r",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [],
                 merge_conflict_exit_codes: [],
                 merge_tool_edits_conflict_markers: false,
@@ -677,6 +681,7 @@ mod tests {
                     "$left",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [],
                 merge_conflict_exit_codes: [],
                 merge_tool_edits_conflict_markers: false,
@@ -709,6 +714,7 @@ mod tests {
                     "$left",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [],
                 merge_conflict_exit_codes: [],
                 merge_tool_edits_conflict_markers: false,
@@ -741,6 +747,7 @@ mod tests {
                     "$left",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [],
                 merge_conflict_exit_codes: [],
                 merge_tool_edits_conflict_markers: false,
@@ -767,6 +774,7 @@ mod tests {
                     "$left",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [],
                 merge_conflict_exit_codes: [],
                 merge_tool_edits_conflict_markers: false,
@@ -840,6 +848,7 @@ mod tests {
                     "$left",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [
                     "$base",
                     "$left",
@@ -897,6 +906,7 @@ mod tests {
                     "$left",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [
                     "$left",
                     "$base",
@@ -931,6 +941,7 @@ mod tests {
                     "$left",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [
                     "$left",
                     "$base",
@@ -968,6 +979,7 @@ mod tests {
                     "$left",
                     "$right",
                 ],
+                edit_invocation_mode: Dir,
                 merge_args: [
                     "$base",
                     "$left",

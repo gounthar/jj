@@ -294,7 +294,7 @@ push = "origin"
 ## Git push options
 
 `jj git push` supports passing Git “push options” to the server via
-`-o/--option`. These are forwarded to the remote and interpreted by the hosting
+`-o`/`--option`. These are forwarded to the remote and interpreted by the hosting
 platform, if it supports them. You can repeat `-o` to send multiple options.
 
 - Syntax: `jj git push -o <push_option>` or `jj git push --option <push_option>`
@@ -317,7 +317,7 @@ Examples with GitLab push options (see GitLab docs for details):
   ```
 - Create a merge request with metadata on push:
   ```shell
-  jj git push --allow-new \
+  jj git push \
     -o merge_request.create \
     -o merge_request.target=main \
     -o 'merge_request.title=Add feature X' \

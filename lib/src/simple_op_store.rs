@@ -39,7 +39,7 @@ use crate::backend::CommitId;
 use crate::backend::MillisSinceEpoch;
 use crate::backend::Timestamp;
 use crate::content_hash::blake2b_hash;
-use crate::dag_walk;
+use crate::dag_walk_async;
 use crate::file_util::IoResultExt as _;
 use crate::file_util::PathError;
 use crate::file_util::persist_content_addressed_temp_file;
@@ -306,7 +306,7 @@ impl OpStore for SimpleOpStore {
                 .block_on()
                 .map(|data| (id.clone(), data))
         };
-        let reachable_ops: HashMap<OperationId, Operation> = dag_walk::dfs_ok(
+        let reachable_ops: HashMap<OperationId, Operation> = dag_walk_async::dfs(
             head_ids.iter().map(read_op),
             |(id, _)| id.clone(),
             |(_, data)| data.parents.iter().map(read_op).collect_vec(),
@@ -448,7 +448,11 @@ fn operation_metadata_to_proto(
         username: metadata.username.clone(),
         is_snapshot: metadata.is_snapshot,
         workspace_name: metadata.workspace_name.clone().map(Into::into),
-        tags: metadata.tags.clone(),
+        attributes: metadata
+            .attributes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
     }
 }
 
@@ -467,7 +471,7 @@ fn operation_metadata_from_proto(
         username: proto.username,
         is_snapshot: proto.is_snapshot,
         workspace_name,
-        tags: proto.tags,
+        attributes: proto.attributes.into_iter().collect(),
     }
 }
 
@@ -571,7 +575,14 @@ fn view_to_proto(view: &View) -> crate::protos::simple_op_store::View {
         })
         .collect();
 
-    let git_head = ref_target_to_proto(&view.git_head);
+    let git_heads = view
+        .git_heads
+        .iter()
+        .map(|(name, target)| crate::protos::simple_op_store::GitHead {
+            name: name.as_str().to_owned(),
+            target: ref_target_to_proto(target),
+        })
+        .collect();
 
     #[expect(deprecated)]
     crate::protos::simple_op_store::View {
@@ -583,9 +594,14 @@ fn view_to_proto(view: &View) -> crate::protos::simple_op_store::View {
         remote_views,
         git_refs,
         git_head_legacy: Default::default(),
-        git_head,
+        // TODO: Remove in jj 0.51+
+        git_head: view
+            .git_heads
+            .get(WorkspaceName::DEFAULT)
+            .and_then(ref_target_to_proto),
         // New/loaded view should have been migrated to the latest format
         has_git_refs_migrated_to_remote_tags: true,
+        git_heads,
     }
 }
 
@@ -663,14 +679,29 @@ fn view_from_proto(proto: crate::protos::simple_op_store::View) -> Result<View, 
         }
     }
 
+    let mut git_heads: BTreeMap<WorkspaceNameBuf, RefTarget> = proto
+        .git_heads
+        .into_iter()
+        .map(|entry| {
+            (
+                WorkspaceNameBuf::from(entry.name),
+                ref_target_from_proto(entry.target),
+            )
+        })
+        .collect();
     #[expect(deprecated)]
-    let git_head = if proto.git_head.is_some() {
-        ref_target_from_proto(proto.git_head)
-    } else if !proto.git_head_legacy.is_empty() {
-        RefTarget::normal(CommitId::new(proto.git_head_legacy))
-    } else {
-        RefTarget::absent()
-    };
+    if git_heads.is_empty() {
+        let git_head = if proto.git_head.is_some() {
+            ref_target_from_proto(proto.git_head)
+        } else if !proto.git_head_legacy.is_empty() {
+            RefTarget::normal(CommitId::new(proto.git_head_legacy))
+        } else {
+            RefTarget::absent()
+        };
+        if git_head.is_present() {
+            git_heads.insert(WorkspaceName::DEFAULT.to_owned(), git_head);
+        }
+    }
 
     Ok(View {
         head_ids,
@@ -678,7 +709,7 @@ fn view_from_proto(proto: crate::protos::simple_op_store::View) -> Result<View, 
         local_tags,
         remote_views,
         git_refs,
-        git_head,
+        git_heads,
         wc_commit_ids,
     })
 }
@@ -941,9 +972,7 @@ fn remote_ref_state_from_proto(proto_value: i32) -> Result<RemoteRefState, PostD
 #[cfg(test)]
 mod tests {
     use insta::assert_snapshot;
-    use itertools::Itertools as _;
     use maplit::btreemap;
-    use maplit::hashmap;
     use maplit::hashset;
 
     use super::*;
@@ -999,7 +1028,9 @@ mod tests {
                 "refs/heads/main".into() => git_refs_main_target,
                 "refs/heads/feature".into() => git_refs_feature_target,
             },
-            git_head: RefTarget::normal(CommitId::from_hex("fff111")),
+            git_heads: btreemap! {
+                WorkspaceName::DEFAULT.to_owned() => RefTarget::normal(CommitId::from_hex("fff111")),
+            },
             wc_commit_ids: btreemap! {
                 WorkspaceName::DEFAULT.to_owned() => default_wc_commit_id,
                 "test".into() => test_wc_commit_id,
@@ -1035,7 +1066,7 @@ mod tests {
                 username: "someone".to_string(),
                 is_snapshot: false,
                 workspace_name: Some(WorkspaceNameBuf::from("test")),
-                tags: hashmap! {
+                attributes: btreemap! {
                     "key1".to_string() => "value1".to_string(),
                     "key2".to_string() => "value2".to_string(),
                 },
@@ -1055,7 +1086,7 @@ mod tests {
         // Test exact output so we detect regressions in compatibility
         assert_snapshot!(
             ViewId::new(blake2b_hash(&create_view()).to_vec()).hex(),
-            @"2c0b174d117ca85e7faa96f6d997362403105e8eb31e7f82ac9abd3dc48ae62683e9a76ef5d117ebc8a743d17e1945236df9ccefd7574f7e4b5336a63796b967"
+            @"b37a61a743f394241cd44e9016cc6f9b68321d7ae0e21e432d9124d08a1b5f98f08f6a1d04534ea0652ea4be74e9c4fb2075bdf00343165b5d380aa196790a14"
         );
     }
 

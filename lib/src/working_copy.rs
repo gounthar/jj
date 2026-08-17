@@ -17,24 +17,24 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pollster::FutureExt as _;
 use thiserror::Error;
 use tracing::instrument;
 
 use crate::backend::BackendError;
 use crate::commit::Commit;
-use crate::dag_walk;
 use crate::gitignore::GitIgnoreError;
 use crate::gitignore::GitIgnoreFile;
 use crate::matchers::Matcher;
 use crate::merged_tree::MergedTree;
 use crate::op_store::OpStoreError;
 use crate::op_store::OperationId;
+use crate::op_walk;
 use crate::operation::Operation;
 use crate::ref_name::WorkspaceName;
 use crate::ref_name::WorkspaceNameBuf;
@@ -49,6 +49,7 @@ use crate::store::Store;
 use crate::transaction::TransactionCommitError;
 
 /// The trait all working-copy implementations must implement.
+#[async_trait(?Send)]
 pub trait WorkingCopy: Any + Send {
     /// The name/id of the implementation. Used for choosing the right
     /// implementation when loading a working copy.
@@ -71,7 +72,7 @@ pub trait WorkingCopy: Any + Send {
 
     /// Locks the working copy and returns an instance with methods for updating
     /// the working copy files and state.
-    fn start_mutation(&self) -> Result<Box<dyn LockedWorkingCopy>, WorkingCopyStateError>;
+    async fn start_mutation(&self) -> Result<Box<dyn LockedWorkingCopy>, WorkingCopyStateError>;
 }
 
 impl dyn WorkingCopy {
@@ -172,12 +173,6 @@ pub enum SnapshotError {
     /// A tracked path contained invalid component such as `..`.
     #[error(transparent)]
     InvalidRepoPath(#[from] InvalidRepoPathError),
-    /// A path in the working copy was not valid UTF-8.
-    #[error("Working copy path {} is not valid UTF-8", path.to_string_lossy())]
-    InvalidUtf8Path {
-        /// The path with invalid UTF-8.
-        path: OsString,
-    },
     /// A symlink target in the working copy was not valid UTF-8.
     #[error("Symlink {path} target is not valid UTF-8")]
     InvalidUtf8SymlinkTarget {
@@ -239,6 +234,10 @@ pub type SnapshotProgress<'a> = dyn Fn(&RepoPath) + 'a + Sync;
 pub struct SnapshotStats {
     /// List of new (previously untracked) files which are still untracked.
     pub untracked_paths: BTreeMap<RepoPathBuf, UntrackedReason>,
+    /// Paths that were skipped because their file names aren't valid UTF-8,
+    /// as (directory, file name) pairs. These paths cannot be represented as
+    /// `RepoPath`s.
+    pub invalid_utf8_paths: BTreeSet<(RepoPathBuf, OsString)>,
 }
 
 /// Reason why the new path isn't tracked.
@@ -374,13 +373,11 @@ impl WorkingCopyFreshness {
                 .load_operation(locked_wc.old_operation_id())
                 .await?;
             let repo_operation = repo.operation();
-            let ancestor_op = dag_walk::closest_common_node_ok(
-                [Ok(wc_operation.clone())],
-                [Ok(repo_operation.clone())],
-                |op: &Operation| op.id().clone(),
-                |op: &Operation| op.parents().block_on(),
-            )?
-            .expect("unrelated operations");
+            let ancestor_ops =
+                op_walk::closest_common_ancestors([wc_operation.clone()], [repo_operation.clone()])
+                    .await?;
+            // TODO: test all operations instead of using only a single common operation
+            let ancestor_op = ancestor_ops.into_iter().next().unwrap();
             if ancestor_op.id() == repo_operation.id() {
                 // The working copy was updated since we loaded the repo. The repo must be
                 // reloaded at the working copy's operation.

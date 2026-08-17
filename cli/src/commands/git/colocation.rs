@@ -23,6 +23,7 @@ use jj_lib::op_store::RefTarget;
 use jj_lib::repo::Repo as _;
 
 use crate::cli_util::CommandHelper;
+use crate::cli_util::WorkspaceCommandHelper;
 use crate::command_error::CommandError;
 use crate::command_error::user_error;
 use crate::command_error::user_error_with_message;
@@ -71,10 +72,9 @@ pub async fn cmd_git_colocation(
 }
 
 /// Check that the repository supports colocation commands
-/// which means that the repo is backed by git, is not
-/// already colocated, and is a main workspace
+/// which means that the repo is backed by Git and is a main workspace
 fn workspace_supports_git_colocation_commands(
-    workspace_command: &crate::cli_util::WorkspaceCommandHelper,
+    workspace_command: &WorkspaceCommandHelper,
 ) -> Result<(), CommandError> {
     // Check if backend is Git (will show an error otherwise)
     git::get_git_backend(workspace_command.repo().store())?;
@@ -94,14 +94,14 @@ async fn cmd_git_colocation_status(
     command: &CommandHelper,
     _args: &GitColocationStatusArgs,
 ) -> Result<(), CommandError> {
-    let workspace_command = command.workspace_helper(ui)?;
+    let workspace_command = command.workspace_helper(ui).await?;
 
     // Make sure that the workspace supports git colocation commands
     workspace_supports_git_colocation_commands(&workspace_command)?;
 
-    let repo = workspace_command.repo();
-    let is_colocated = is_colocated_git_workspace(workspace_command.workspace(), repo);
-    let git_head = repo.view().git_head();
+    let is_colocated = is_colocated_git_workspace(workspace_command.workspace());
+    let workspace_name = workspace_command.workspace_name();
+    let git_head = workspace_command.repo().view().git_head(workspace_name);
 
     if is_colocated {
         writeln!(ui.stdout(), "Workspace is currently colocated with Git.")?;
@@ -132,6 +132,17 @@ async fn cmd_git_colocation_status(
             ui.hint_default(),
             "To disable colocation, run: `jj git colocation disable`"
         )?;
+    } else if !workspace_command
+        .repo_path()
+        .join("store")
+        .join("git")
+        .exists()
+    {
+        writeln!(
+            ui.hint_default(),
+            "Colocation cannot be enabled because the workspace is backed by an external Git \
+             repository."
+        )?;
     } else {
         writeln!(
             ui.hint_default(),
@@ -147,13 +158,13 @@ async fn cmd_git_colocation_enable(
     command: &CommandHelper,
     _args: &GitColocationEnableArgs,
 ) -> Result<(), CommandError> {
-    let workspace_command = command.workspace_helper(ui)?;
+    let workspace_command = command.workspace_helper(ui).await?;
 
     // Make sure that the workspace supports git colocation commands
     workspace_supports_git_colocation_commands(&workspace_command)?;
 
     // Then ensure that the workspace is not already colocated before proceeding
-    if is_colocated_git_workspace(workspace_command.workspace(), workspace_command.repo()) {
+    if is_colocated_git_workspace(workspace_command.workspace()) {
         writeln!(ui.status(), "Workspace is already colocated with Git.")?;
         return Ok(());
     }
@@ -176,6 +187,17 @@ async fn cmd_git_colocation_enable(
         ErrorKind::AlreadyExists | ErrorKind::DirectoryNotEmpty => {
             user_error("A .git directory already exists in the workspace root. Cannot colocate.")
         }
+        // An external Git repository (e.g. created by `jj git init
+        // --git-repo=<path>`) isn't managed by jj and cannot be moved.
+        // workspace_supports_git_colocation_commands() already ensured that
+        // the backend is Git.
+        ErrorKind::NotFound => {
+            let git_backend = git::get_git_backend(workspace_command.repo().store()).unwrap();
+            user_error(format!(
+                "Cannot colocate a workspace backed by an external Git repository at {}",
+                git_backend.git_repo_path().display()
+            ))
+        }
         _ => user_error_with_message(
             "Failed to move Git repository from .jj/repo/store/git to workspace root directory.",
             err,
@@ -197,7 +219,11 @@ async fn cmd_git_colocation_enable(
     maybe_add_gitignore(&workspace_command)?;
 
     // Finally, update git HEAD to point to the working-copy commit's parent
-    let wc_commit = workspace_command.repo().store().get_commit(&wc_commit_id)?;
+    let wc_commit = workspace_command
+        .repo()
+        .store()
+        .get_commit_async(&wc_commit_id)
+        .await?;
     set_git_head_to_wc_parent(ui, &mut workspace_command, &wc_commit).await?;
 
     writeln!(
@@ -213,13 +239,13 @@ async fn cmd_git_colocation_disable(
     command: &CommandHelper,
     _args: &GitColocationDisableArgs,
 ) -> Result<(), CommandError> {
-    let workspace_command = command.workspace_helper(ui)?;
+    let workspace_command = command.workspace_helper(ui).await?;
 
     // Make sure that the repository supports git colocation commands
     workspace_supports_git_colocation_commands(&workspace_command)?;
 
     // Then ensure that the repo is colocated before proceeding
-    if !is_colocated_git_workspace(workspace_command.workspace(), workspace_command.repo()) {
+    if !is_colocated_git_workspace(workspace_command.workspace()) {
         writeln!(ui.status(), "Workspace is already not colocated with Git.")?;
         return Ok(());
     }
@@ -272,7 +298,7 @@ fn set_git_repo_bare(path: &std::path::Path, bare: bool) -> Result<(), CommandEr
             .map_err(|err| user_error_with_message("Failed to open Git config file.", err))?;
 
     config_file
-        .set_raw_value(&"core.bare", bare_str)
+        .set_raw_value("core.bare", bare_str)
         .map_err(|err| {
             user_error_with_message(
                 format!("Failed to set core.bare to {bare_str} in Git config."),
@@ -295,11 +321,12 @@ fn set_git_repo_bare(path: &std::path::Path, bare: bool) -> Result<(), CommandEr
 /// Set the git HEAD to the working copy commit's parent
 async fn set_git_head_to_wc_parent(
     ui: &mut Ui,
-    workspace_command: &mut crate::cli_util::WorkspaceCommandHelper,
+    workspace_command: &mut WorkspaceCommandHelper,
     wc_commit: &Commit,
 ) -> Result<(), CommandError> {
+    let workspace_name = workspace_command.workspace_name().to_owned();
     let mut tx = workspace_command.start_transaction();
-    git::reset_head(tx.repo_mut(), wc_commit).await?;
+    git::reset_head(tx.repo_mut(), &workspace_name, wc_commit).await?;
     if tx.repo().has_changes() {
         tx.finish(ui, "set git head to working copy parent").await?;
     }
@@ -309,10 +336,12 @@ async fn set_git_head_to_wc_parent(
 /// Remove the git HEAD reference
 async fn remove_git_head(
     ui: &mut Ui,
-    workspace_command: &mut crate::cli_util::WorkspaceCommandHelper,
+    workspace_command: &mut WorkspaceCommandHelper,
 ) -> Result<(), CommandError> {
+    let workspace_name = workspace_command.workspace_name().to_owned();
     let mut tx = workspace_command.start_transaction();
-    tx.repo_mut().set_git_head_target(RefTarget::absent());
+    tx.repo_mut()
+        .set_git_head_target(&workspace_name, RefTarget::absent());
     if tx.repo().has_changes() {
         tx.finish(ui, "remove git head reference").await?;
     }
@@ -323,8 +352,8 @@ async fn remove_git_head(
 async fn reload_workspace_helper(
     ui: &mut Ui,
     command: &CommandHelper,
-    workspace_command: crate::cli_util::WorkspaceCommandHelper,
-) -> Result<crate::cli_util::WorkspaceCommandHelper, CommandError> {
+    workspace_command: WorkspaceCommandHelper,
+) -> Result<WorkspaceCommandHelper, CommandError> {
     let workspace = command.load_workspace_at(
         workspace_command.workspace_root(),
         workspace_command.settings(),

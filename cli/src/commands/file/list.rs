@@ -39,6 +39,9 @@ pub(crate) struct FileListArgs {
     /// keywords in the template expression. See [`jj help -k templates`] for
     /// more information.
     ///
+    /// The default template can be set by the `templates.file_list`
+    /// setting.
+    ///
     /// [`TreeEntry` type]:
     ///     https://docs.jj-vcs.dev/latest/templates/#treeentry-type
     ///
@@ -60,7 +63,7 @@ pub(crate) async fn cmd_file_list(
     command: &CommandHelper,
     args: &FileListArgs,
 ) -> Result<(), CommandError> {
-    let workspace_command = command.workspace_helper(ui)?;
+    let workspace_command = command.workspace_helper(ui).await?;
     let commit = workspace_command
         .resolve_single_rev(ui, &args.revision)
         .await?;

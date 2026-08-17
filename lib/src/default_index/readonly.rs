@@ -26,6 +26,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use itertools::Itertools as _;
 use smallvec::smallvec;
 use thiserror::Error;
@@ -715,43 +716,58 @@ impl AsCompositeIndex for DefaultReadonlyIndex {
     }
 }
 
+#[async_trait]
 impl Index for DefaultReadonlyIndex {
-    fn shortest_unique_commit_id_prefix_len(&self, commit_id: &CommitId) -> IndexResult<usize> {
-        self.0.shortest_unique_commit_id_prefix_len(commit_id)
+    async fn shortest_unique_commit_id_prefix_len(
+        &self,
+        commit_id: &CommitId,
+    ) -> IndexResult<usize> {
+        self.0.shortest_unique_commit_id_prefix_len(commit_id).await
     }
 
-    fn resolve_commit_id_prefix(
+    async fn resolve_commit_id_prefix(
         &self,
         prefix: &HexPrefix,
     ) -> IndexResult<PrefixResolution<CommitId>> {
-        self.0.resolve_commit_id_prefix(prefix)
+        self.0.resolve_commit_id_prefix(prefix).await
     }
 
-    fn has_id(&self, commit_id: &CommitId) -> IndexResult<bool> {
+    async fn has_id(&self, commit_id: &CommitId) -> IndexResult<bool> {
         Ok(self.has_id_impl(commit_id))
     }
 
-    fn is_ancestor(&self, ancestor_id: &CommitId, descendant_id: &CommitId) -> IndexResult<bool> {
-        self.0.is_ancestor(ancestor_id, descendant_id)
+    async fn is_ancestor(
+        &self,
+        ancestor_id: &CommitId,
+        descendant_id: &CommitId,
+    ) -> IndexResult<bool> {
+        self.0.is_ancestor(ancestor_id, descendant_id).await
     }
 
-    fn common_ancestors(&self, set1: &[CommitId], set2: &[CommitId]) -> IndexResult<Vec<CommitId>> {
-        self.0.common_ancestors(set1, set2)
+    async fn common_ancestors(
+        &self,
+        set1: &[CommitId],
+        set2: &[CommitId],
+    ) -> IndexResult<Vec<CommitId>> {
+        self.0.common_ancestors(set1, set2).await
     }
 
     fn all_heads_for_gc(&self) -> IndexResult<Box<dyn Iterator<Item = CommitId> + '_>> {
         self.0.all_heads_for_gc()
     }
 
-    fn heads(&self, candidates: &mut dyn Iterator<Item = &CommitId>) -> IndexResult<Vec<CommitId>> {
-        self.0.heads(candidates)
+    async fn heads(
+        &self,
+        candidates: &mut (dyn Iterator<Item = &CommitId> + Send),
+    ) -> IndexResult<Vec<CommitId>> {
+        self.0.heads(candidates).await
     }
 
-    fn changed_paths_in_commit(
+    async fn changed_paths_in_commit(
         &self,
         commit_id: &CommitId,
     ) -> IndexResult<Option<Box<dyn Iterator<Item = RepoPathBuf> + '_>>> {
-        self.0.changed_paths_in_commit(commit_id)
+        self.0.changed_paths_in_commit(commit_id).await
     }
 
     fn evaluate_revset(

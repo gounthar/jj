@@ -14,7 +14,11 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
 
+use bstr::BString;
+use jj_lib::backend::Timestamp;
 use jj_lib::settings::UserSettings;
 
 use crate::template_builder;
@@ -41,6 +45,7 @@ use crate::templater::TemplatePropertyExt as _;
 /// registered to extract properties from the self object.
 pub struct GenericTemplateLanguage<'a, C> {
     settings: UserSettings,
+    current_dir: PathBuf,
     build_fn_table: GenericTemplateBuildFnTable<'a, C>,
 }
 
@@ -51,18 +56,20 @@ where
     /// Sets up environment with no keywords.
     ///
     /// New keyword functions can be registered by `add_keyword()`.
-    pub fn new(settings: &UserSettings) -> Self {
-        Self::with_keywords(HashMap::new(), settings)
+    pub fn new(settings: &UserSettings, current_dir: &Path) -> Self {
+        Self::with_keywords(HashMap::new(), settings, current_dir)
     }
 
     /// Sets up environment with the given `keywords` table.
     pub fn with_keywords(
         keywords: GenericTemplateBuildKeywordFnMap<'a, C>,
         settings: &UserSettings,
+        current_dir: &Path,
     ) -> Self {
         Self {
             // Clone settings to keep lifetime simple. It's cheap.
             settings: settings.clone(),
+            current_dir: current_dir.to_owned(),
             build_fn_table: GenericTemplateBuildFnTable {
                 core: CoreTemplateBuildFnTable::builtin(),
                 keywords,
@@ -101,6 +108,10 @@ where
 
     fn settings(&self) -> &UserSettings {
         &self.settings
+    }
+
+    fn current_dir(&self) -> &Path {
+        &self.current_dir
     }
 
     fn build_function(
@@ -191,31 +202,38 @@ where
         }
     }
 
-    fn try_into_boolean(self) -> Option<BoxedTemplateProperty<'a, bool>> {
+    fn try_into_byte_string(self) -> Result<BoxedTemplateProperty<'a, BString>, Self> {
         match self {
-            Self::Core(property) => property.try_into_boolean(),
-            Self::Self_(_) => None,
+            Self::Core(property) => property.try_into_byte_string().map_err(Self::Core),
+            Self::Self_(_) => Err(self),
         }
     }
 
-    fn try_into_integer(self) -> Option<BoxedTemplateProperty<'a, i64>> {
+    fn try_into_string(self) -> Result<BoxedTemplateProperty<'a, String>, Self> {
         match self {
-            Self::Core(property) => property.try_into_integer(),
-            Self::Self_(_) => None,
+            Self::Core(property) => property.try_into_string().map_err(Self::Core),
+            Self::Self_(_) => Err(self),
         }
     }
 
-    fn try_into_timestamp(self) -> Option<BoxedTemplateProperty<'a, jj_lib::backend::Timestamp>> {
+    fn try_into_boolean(self) -> Result<BoxedTemplateProperty<'a, bool>, Self> {
         match self {
-            Self::Core(property) => property.try_into_timestamp(),
-            Self::Self_(_) => None,
+            Self::Core(property) => property.try_into_boolean().map_err(Self::Core),
+            Self::Self_(_) => Err(self),
         }
     }
 
-    fn try_into_stringify(self) -> Option<BoxedTemplateProperty<'a, String>> {
+    fn try_into_integer(self) -> Result<BoxedTemplateProperty<'a, i64>, Self> {
         match self {
-            Self::Core(property) => property.try_into_stringify(),
-            Self::Self_(_) => None,
+            Self::Core(property) => property.try_into_integer().map_err(Self::Core),
+            Self::Self_(_) => Err(self),
+        }
+    }
+
+    fn try_into_timestamp(self) -> Result<BoxedTemplateProperty<'a, Timestamp>, Self> {
+        match self {
+            Self::Core(property) => property.try_into_timestamp().map_err(Self::Core),
+            Self::Self_(_) => Err(self),
         }
     }
 

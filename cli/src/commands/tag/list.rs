@@ -41,6 +41,15 @@ use crate::ui::Ui;
 /// different from the local tag. An untracked remote tag won't be listed. For a
 /// conflicted tag (both local and remote), old target revisions are preceded by
 /// a "-" and new target revisions are preceded by a "+".
+///
+/// The `-r` flag combined with revset expressions can be used for filtering.
+/// For example:
+///
+/// * `jj tag list -r 'REV::'` shows tags whose targets are descendants of REV
+///   (similar to `git tag --contains REV`).
+///
+/// * `jj tag list -r '::REV'` shows tags whose targets are ancestors of REV
+///   (similar to `git tag --merged REV`).
 #[derive(clap::Args, Clone, Debug)]
 pub struct TagListArgs {
     /// Show all tracked and untracked remote tags including the ones whose
@@ -59,7 +68,6 @@ pub struct TagListArgs {
     /// [string pattern syntax]:
     ///     https://docs.jj-vcs.dev/latest/revsets/#string-patterns
     #[arg(long = "remote", value_name = "REMOTE", conflicts_with = "all_remotes")]
-    #[arg(hide = true)] // TODO: unhide when remote tags get stabilized (#7528)
     #[arg(add = ArgValueCandidates::new(complete::git_remotes))]
     remotes: Option<Vec<String>>,
 
@@ -67,7 +75,6 @@ pub struct TagListArgs {
     ///
     /// This omits local Git-tracking tags by default.
     #[arg(long, short, conflicts_with = "all_remotes")]
-    #[arg(hide = true)] // TODO: unhide when remote tags get stabilized (#7528)
     tracked: bool,
 
     /// Show conflicted tags only
@@ -96,6 +103,9 @@ pub struct TagListArgs {
     /// keywords in the template expression. See [`jj help -k templates`]
     /// for more information.
     ///
+    /// The default template can be set by the `templates.tag_list`
+    /// setting.
+    ///
     /// [`CommitRef` type]:
     ///     https://docs.jj-vcs.dev/latest/templates/#commitref-type
     ///
@@ -121,7 +131,7 @@ pub async fn cmd_tag_list(
     command: &CommandHelper,
     args: &TagListArgs,
 ) -> Result<(), CommandError> {
-    let workspace_command = command.workspace_helper(ui)?;
+    let workspace_command = command.workspace_helper(ui).await?;
     let settings = workspace_command.settings();
     let repo = workspace_command.repo();
     let view = repo.view();

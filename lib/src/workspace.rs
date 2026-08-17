@@ -25,12 +25,11 @@ use thiserror::Error;
 
 use crate::backend::BackendInitError;
 use crate::commit::Commit;
+use crate::default_backend_factories::default_working_copy_factory;
 use crate::file_util;
 use crate::file_util::BadPathEncoding;
 use crate::file_util::IoResultExt as _;
 use crate::file_util::PathError;
-use crate::local_working_copy::LocalWorkingCopy;
-use crate::local_working_copy::LocalWorkingCopyFactory;
 use crate::merged_tree::MergedTree;
 use crate::op_heads_store::OpHeadsStoreError;
 use crate::op_store::OperationId;
@@ -207,10 +206,13 @@ impl Workspace {
     pub async fn init_internal_git(
         user_settings: &UserSettings,
         workspace_root: &Path,
+        object_hash: gix::hash::Kind,
     ) -> Result<(Self, Arc<ReadonlyRepo>), WorkspaceInitError> {
         let backend_initializer: &BackendInitializer = &|settings, store_path| {
             Ok(Box::new(crate::git_backend::GitBackend::init_internal(
-                settings, store_path,
+                settings,
+                store_path,
+                object_hash,
             )?))
         };
         let signer = Signer::from_settings(user_settings)?;
@@ -223,6 +225,7 @@ impl Workspace {
     pub async fn init_colocated_git(
         user_settings: &UserSettings,
         workspace_root: &Path,
+        object_hash: gix::hash::Kind,
     ) -> Result<(Self, Arc<ReadonlyRepo>), WorkspaceInitError> {
         let backend_initializer = |settings: &UserSettings,
                                    store_path: &Path|
@@ -240,6 +243,7 @@ impl Workspace {
                 settings,
                 store_path,
                 &store_relative_workspace_root,
+                object_hash,
             )?;
             Ok(Box::new(backend))
         };
@@ -439,10 +443,10 @@ impl Workspace {
         self.working_copy.as_ref()
     }
 
-    pub fn start_working_copy_mutation(
+    pub async fn start_working_copy_mutation(
         &mut self,
     ) -> Result<LockedWorkspace<'_>, WorkingCopyStateError> {
-        let locked_wc = self.working_copy.start_mutation()?;
+        let locked_wc = self.working_copy.start_mutation().await?;
         Ok(LockedWorkspace {
             base: self,
             locked_wc,
@@ -455,7 +459,7 @@ impl Workspace {
         old_tree: Option<&MergedTree>,
         commit: &Commit,
     ) -> Result<CheckoutStats, CheckoutError> {
-        let mut locked_ws = self.start_working_copy_mutation()?;
+        let mut locked_ws = self.start_working_copy_mutation().await?;
         // Check if the current working-copy commit has changed on disk compared to what
         // the caller expected. It's safe to check out another commit
         // regardless, but it's probably not what  the caller wanted, so we let
@@ -625,17 +629,4 @@ impl WorkspaceLoader for DefaultWorkspaceLoader {
     fn get_working_copy_type(&self) -> Result<String, StoreLoadError> {
         read_store_type("working copy", self.working_copy_state_path.join("type"))
     }
-}
-
-pub fn default_working_copy_factories() -> WorkingCopyFactories {
-    let mut factories = WorkingCopyFactories::new();
-    factories.insert(
-        LocalWorkingCopy::name().to_owned(),
-        Box::new(LocalWorkingCopyFactory {}),
-    );
-    factories
-}
-
-pub fn default_working_copy_factory() -> Box<dyn WorkingCopyFactory> {
-    Box::new(LocalWorkingCopyFactory {})
 }

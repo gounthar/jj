@@ -31,6 +31,7 @@ use jj_lib::id_prefix::IdPrefixContext;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::ref_name::RemoteName;
 use jj_lib::ref_name::RemoteNameBuf;
+use jj_lib::ref_name::RemoteRefSymbolBuf;
 use jj_lib::repo::Repo;
 use jj_lib::revset;
 use jj_lib::revset::ResolvedRevsetExpression;
@@ -171,7 +172,7 @@ pub(super) fn warn_user_redefined_builtin(
             writeln!(
                 ui.warning_default(),
                 "Redefining `{table_name}.{decl}` is not recommended; redefine \
-                 `immutable_heads()` instead",
+                 `immutable_heads()` instead.",
             )?;
         }
     }
@@ -194,7 +195,7 @@ pub fn parse_immutable_heads_expression(
     diagnostics: &mut RevsetDiagnostics,
     context: &RevsetParseContext,
 ) -> Result<Arc<UserRevsetExpression>, RevsetParseError> {
-    let (_, _, immutable_heads_str) = context
+    let (_, _, immutable_heads_str, _) = context
         .aliases_map
         .get_function(USER_IMMUTABLE_HEADS, 0)
         .unwrap();
@@ -210,7 +211,7 @@ pub(super) fn try_resolve_trunk_alias(
     repo: &dyn Repo,
     context: &RevsetParseContext,
 ) -> Result<Option<Arc<ResolvedRevsetExpression>>, RevsetResolutionError> {
-    let (_, _, revset_str) = context
+    let (_, _, revset_str, _) = context
         .aliases_map
         .get_function("trunk", 0)
         .expect("trunk() should be defined by default");
@@ -335,6 +336,43 @@ where
     Ok(StringExpression::union_all(expressions))
 }
 
+/// Parses bookmark/tag name patterns or remote symbols.
+pub fn parse_name_patterns_or_remote_symbols<I>(
+    ui: &Ui,
+    texts: I,
+) -> Result<(Vec<StringExpression>, Vec<RemoteRefSymbolBuf>), CommandError>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let wrap_err = |err| {
+        // From<RevsetParseError>, but with different message
+        let hint = revset_parse_error_hint(&err);
+        let message = format!(
+            "Failed to parse name pattern or remote symbol: {}",
+            err.kind()
+        );
+        let mut cmd_err = user_error_with_message(message, err);
+        cmd_err.extend_hints(hint);
+        cmd_err
+    };
+    let mut diagnostics = RevsetDiagnostics::new();
+    let mut name_expressions = Vec::new();
+    let mut remote_symbols = Vec::new();
+    for text in texts {
+        let node = revset::parse_program(text.as_ref()).map_err(wrap_err)?;
+        if let revset::ExpressionKind::RemoteSymbol(symbol) = node.kind {
+            remote_symbols.push(symbol);
+        } else {
+            let expr =
+                revset::expect_string_expression(&mut diagnostics, &node).map_err(wrap_err)?;
+            name_expressions.push(expr);
+        }
+    }
+    print_parse_diagnostics(ui, "In name pattern", &diagnostics)?;
+    Ok((name_expressions, remote_symbols))
+}
+
 /// Parses the given `remotes.<name>.auto-track-bookmarks` settings into a map
 /// of string matchers.
 pub fn parse_remote_auto_track_bookmarks_map(
@@ -346,7 +384,7 @@ pub fn parse_remote_auto_track_bookmarks_map(
         let Some(text) = &settings.auto_track_bookmarks else {
             continue;
         };
-        let expr = parse_remote_auto_track_text(ui, name, text, "auto-track-bookmarks")?;
+        let expr = parse_remote_string_expression(ui, name, text, "auto-track-bookmarks")?;
         matchers.insert(name.clone(), expr.to_matcher());
     }
     Ok(matchers)
@@ -364,7 +402,7 @@ pub fn parse_remote_auto_track_bookmarks_map_for_new_bookmarks(
     for (name, settings) in remote_settings {
         let mut exprs = Vec::new();
         if let Some(text) = &settings.auto_track_bookmarks {
-            exprs.push(parse_remote_auto_track_text(
+            exprs.push(parse_remote_string_expression(
                 ui,
                 name,
                 text,
@@ -372,12 +410,15 @@ pub fn parse_remote_auto_track_bookmarks_map_for_new_bookmarks(
             )?);
         }
         if let Some(text) = &settings.auto_track_created_bookmarks {
-            exprs.push(parse_remote_auto_track_text(
+            exprs.push(parse_remote_string_expression(
                 ui,
                 name,
                 text,
                 "auto-track-created-bookmarks",
             )?);
+        }
+        if exprs.is_empty() {
+            continue;
         }
         matchers.insert(
             name.clone(),
@@ -387,7 +428,33 @@ pub fn parse_remote_auto_track_bookmarks_map_for_new_bookmarks(
     Ok(matchers)
 }
 
-fn parse_remote_auto_track_text(
+/// Parses the given `remotes.<name>.fetch-bookmarks` setting.
+pub fn parse_remote_fetch_bookmarks(
+    ui: &Ui,
+    remote_settings: &RemoteSettingsMap,
+    name: &RemoteName,
+) -> Result<Option<StringExpression>, CommandError> {
+    remote_settings
+        .get(name)
+        .and_then(|settings| settings.fetch_bookmarks.as_ref())
+        .map(|text| parse_remote_string_expression(ui, name, text, "fetch-bookmarks"))
+        .transpose()
+}
+
+/// Parses the given `remotes.<name>.fetch-tags` setting.
+pub fn parse_remote_fetch_tags(
+    ui: &Ui,
+    remote_settings: &RemoteSettingsMap,
+    name: &RemoteName,
+) -> Result<Option<StringExpression>, CommandError> {
+    remote_settings
+        .get(name)
+        .and_then(|settings| settings.fetch_tags.as_ref())
+        .map(|text| parse_remote_string_expression(ui, name, text, "fetch-tags"))
+        .transpose()
+}
+
+fn parse_remote_string_expression(
     ui: &Ui,
     name: &RemoteName,
     text: &str,

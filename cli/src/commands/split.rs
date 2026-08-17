@@ -173,17 +173,18 @@ pub(crate) struct SplitArgs {
     #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     insert_before: Option<Vec<RevisionArg>>,
 
-    /// The change description to use (don't open editor)
+    /// The change description to use for the selected changes (don't open
+    /// editor)
     ///
-    /// Sets the description for the first commit (the one containing the
-    /// selected changes). The second commit keeps the original description.
+    /// Sets the description for the revision containing the selected changes.
+    /// The other revision will keep its original description, if any.
     #[arg(long = "message", short, value_name = "MESSAGE")]
     message_paragraphs: Option<Vec<String>>,
 
-    /// Open an editor to edit the change description
+    /// Open an editor to edit the change description(s)
     ///
-    /// Forces an editor to open when using `--message` to allow the
-    /// message to be edited afterwards.
+    /// Forces an editor to open when using `--message` to allow the message to
+    /// be edited afterward.
     #[arg(long)]
     editor: bool,
 
@@ -275,7 +276,7 @@ pub(crate) async fn cmd_split(
     command: &CommandHelper,
     args: &SplitArgs,
 ) -> Result<(), CommandError> {
-    let mut workspace_command = command.workspace_helper(ui)?;
+    let mut workspace_command = command.workspace_helper(ui).await?;
     let ResolvedSplitArgs {
         target_commit,
         matcher,
@@ -408,7 +409,7 @@ pub(crate) async fn cmd_split(
     };
     if let Some(mut formatter) = ui.status_formatter() {
         if num_rebased > 0 {
-            writeln!(formatter, "Rebased {num_rebased} descendant commits")?;
+            writeln!(formatter, "Rebased {num_rebased} descendant commits.")?;
         }
         write!(formatter, "Selected changes : ")?;
         tx.write_commit_summary(formatter.as_mut(), &first_commit)?;
@@ -586,12 +587,12 @@ The changes that are not selected will replace the original commit.
     if selection.is_full_selection() {
         writeln!(
             ui.warning_default(),
-            "All changes have been selected, so the original revision will become empty"
+            "All changes have been selected, so the original revision will become empty."
         )?;
     } else if selection.is_empty_selection() {
         writeln!(
             ui.warning_default(),
-            "No changes have been selected, so the new revision will be empty"
+            "No changes have been selected, so the new revision will be empty."
         )?;
     }
 

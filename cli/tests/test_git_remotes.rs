@@ -90,9 +90,9 @@ fn test_git_remotes() {
     ");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [remote "bar"]
     	url = http://example.com/repo/bar
     	fetch = +refs/heads/*:refs/remotes/bar/*
@@ -107,17 +107,18 @@ fn test_git_remotes() {
         ".jj/repo/store/git/config",
         indoc! {r#"
             [remote "foo"]
-                url = invalid\
+                url = https://
         "#},
     );
     let output = work_dir.run_jj(["git", "remote", "list"]);
     insta::assert_snapshot!(output, @r#"
     ------- stderr -------
-    Error: Failed to load configured remote foo
+    Error: Unexpected Git error when managing remotes
     Caused by:
     1: The fetch url under `remote.foo` was invalid
-    2: The url at "remote.<name>.url=" could not be parsed
-    3: local path "" does not specify a path to a repository
+    2: The url at "remote.<name>.url=https://" could not be parsed
+    3: URL "https://" can not be parsed as valid URL
+    4: Scheme requires host
     [EOF]
     [exit status: 1]
     "#);
@@ -160,68 +161,150 @@ fn test_git_remote_add() {
 }
 
 #[test]
-fn test_git_remote_with_fetch_tags() {
+fn test_git_remote_add_duplicate_url_warning() {
     let test_env = TestEnvironment::default();
 
     test_env.run_jj_in(".", ["git", "init", "repo"]).success();
     let work_dir = test_env.work_dir("repo");
+    work_dir
+        .run_jj(["git", "remote", "add", "foo", "http://example.com/repo/foo"])
+        .success();
+    let output = work_dir.run_jj(["git", "remote", "add", "bar", "http://example.com/repo/foo"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Warning: Remote foo already uses the same URL.
+    Hint: If this was a mistake, run `jj git remote remove bar`.
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["git", "remote", "list"]);
+    insta::assert_snapshot!(output, @"
+    bar http://example.com/repo/foo
+    foo http://example.com/repo/foo
+    [EOF]
+    ");
+}
 
-    let output = work_dir.run_jj(["git", "remote", "add", "foo", "http://example.com/repo"]);
+#[test]
+fn test_git_remote_add_duplicate_url_warning_with_url_rewrite() {
+    let test_env = TestEnvironment::default();
+
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+    let mut config_file = fs::OpenOptions::new()
+        .append(true)
+        .open(work_dir.root().join(".jj/repo/store/git/config"))
+        .unwrap();
+    // The warning is about exact configured URL strings. Git rewrite rules can
+    // make different strings resolve to the same URL, so they should not affect
+    // whether this warning fires.
+    writeln!(
+        config_file,
+        r#"[url "https://example.com/"]
+	insteadOf = gh:"#
+    )
+    .unwrap();
+    drop(config_file);
+
+    work_dir
+        .run_jj(["git", "remote", "add", "foo", "gh:org/repo"])
+        .success();
+    let output = work_dir.run_jj(["git", "remote", "add", "bar", "gh:org/repo"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Warning: Remote foo already uses the same URL.
+    Hint: If this was a mistake, run `jj git remote remove bar`.
+    [EOF]
+    ");
+    let output = work_dir.run_jj([
+        "git",
+        "remote",
+        "add",
+        "baz",
+        "https://example.com/org/repo",
+    ]);
     insta::assert_snapshot!(output, @"");
+}
+
+#[test]
+fn test_git_remote_add_duplicate_url_warning_omits_url() {
+    let test_env = TestEnvironment::default();
+
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+    // Remote URLs can contain embedded credentials. The warning should identify
+    // the duplicate remote without echoing secrets into stderr or logs.
+    work_dir
+        .run_jj([
+            "git",
+            "remote",
+            "add",
+            "foo",
+            "https://user:token@example.com/repo",
+        ])
+        .success();
+    let output = work_dir.run_jj([
+        "git",
+        "remote",
+        "add",
+        "bar",
+        "https://user:token@example.com/repo",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Warning: Remote foo already uses the same URL.
+    Hint: If this was a mistake, run `jj git remote remove bar`.
+    [EOF]
+    ");
+}
+
+#[test]
+fn test_git_remote_add_duplicate_url_warning_cross_direction() {
+    let test_env = TestEnvironment::default();
+
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+    work_dir
+        .run_jj([
+            "git",
+            "remote",
+            "add",
+            "foo",
+            "http://example.com/repo/fetch",
+            "--push-url",
+            "http://example.com/repo/push",
+        ])
+        .success();
 
     let output = work_dir.run_jj([
         "git",
         "remote",
         "add",
-        "foo-included",
-        "http://example.com/repo",
-        "--fetch-tags",
-        "included",
+        "bar",
+        "http://example.com/repo/new-fetch",
+        "--push-url",
+        "http://example.com/repo/fetch",
     ]);
-    insta::assert_snapshot!(output, @"");
-
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Warning: Remote foo already uses the same URL.
+    Hint: If this was a mistake, run `jj git remote remove bar`.
+    [EOF]
+    ");
     let output = work_dir.run_jj([
         "git",
         "remote",
         "add",
-        "foo-all",
-        "http://example.com/repo",
-        "--fetch-tags",
-        "all",
+        "baz",
+        "http://example.com/repo/push",
+        "--push-url",
+        "http://example.com/repo/new-push",
     ]);
-    insta::assert_snapshot!(output, @"");
-
-    let output = work_dir.run_jj([
-        "git",
-        "remote",
-        "add",
-        "foo-none",
-        "http://example.com/repo",
-        "--fetch-tags",
-        "none",
-    ]);
-    insta::assert_snapshot!(output, @"");
-
-    insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
-    [core]
-    	repositoryformatversion = 0
-    	bare = true
-    	logallrefupdates = false
-    [remote "foo"]
-    	url = http://example.com/repo
-    	fetch = +refs/heads/*:refs/remotes/foo/*
-    [remote "foo-included"]
-    	url = http://example.com/repo
-    	fetch = +refs/heads/*:refs/remotes/foo-included/*
-    [remote "foo-all"]
-    	url = http://example.com/repo
-    	tagOpt = --tags
-    	fetch = +refs/heads/*:refs/remotes/foo-all/*
-    [remote "foo-none"]
-    	url = http://example.com/repo
-    	tagOpt = --no-tags
-    	fetch = +refs/heads/*:refs/remotes/foo-none/*
-    "#);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Warning: Remote foo already uses the same URL.
+    Hint: If this was a mistake, run `jj git remote remove baz`.
+    [EOF]
+    ");
 }
 
 #[test]
@@ -274,9 +357,9 @@ fn test_git_remote_set_url() {
     ");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [remote "foo"]
     	url = http://example.com/repo/bar
     	fetch = +refs/heads/*:refs/remotes/foo/*
@@ -293,9 +376,9 @@ fn test_git_remote_set_url() {
     insta::assert_snapshot!(output, @"");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [remote "foo"]
     	url = http://example.com/repo/bar
     	pushurl = https://example.com/repo/bar
@@ -312,9 +395,9 @@ fn test_git_remote_set_url() {
     insta::assert_snapshot!(output, @"");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [remote "foo"]
     	url = http://example.com/repo/bar
     	pushurl = git@example.com:repo/bar
@@ -331,9 +414,9 @@ fn test_git_remote_set_url() {
     insta::assert_snapshot!(output, @"");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [remote "foo"]
     	url = http://example.com/repo/bar2
     	pushurl = git@example.com:repo/bar
@@ -349,9 +432,9 @@ fn test_git_remote_set_url() {
     insta::assert_snapshot!(output, @"");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [remote "foo"]
     	url = http://example.com/repo/bar
     	pushurl = git@example.com:repo/bar
@@ -388,9 +471,9 @@ fn test_git_remote_set_url() {
     insta::assert_snapshot!(output, @"");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [remote "foo"]
     	url = https://example.com/repo/baz
     	pushurl = git@example.com:/repo/baz
@@ -409,9 +492,9 @@ fn test_git_remote_set_url() {
     insta::assert_snapshot!(output, @"");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [remote "foo"]
     	url = https://example.com/repo/bar
     	pushurl = git@example.com:/repo/bar
@@ -493,15 +576,198 @@ fn test_git_remote_rename() {
     ");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [remote "baz"]
     	url = http://example.com/repo/baz
     	fetch = +refs/heads/*:refs/remotes/baz/*
     [remote "bar"]
     	url = http://example.com/repo/foo
     	fetch = +refs/heads/*:refs/remotes/bar/*
+    "#);
+}
+
+#[test]
+fn test_git_remote_rename_updates_trunk() {
+    // Verify trunk() resolves correctly after renaming the remote it references.
+    let test_env = TestEnvironment::default();
+
+    let remote_repo = git::init(test_env.env_root().join("remote"));
+    git::add_commit(&remote_repo, "refs/heads/main", "file", b"", "init", &[]);
+    git::set_symbolic_reference(&remote_repo, "HEAD", "refs/heads/main");
+    test_env
+        .run_jj_in(".", ["git", "clone", "--branch=main", "remote", "local"])
+        .success();
+    let local_dir = test_env.work_dir("local");
+
+    let output = local_dir.run_jj(["git", "remote", "rename", "origin", "upstream"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Updating the revset alias `trunk()` to `main@upstream`.
+    [EOF]
+    ");
+
+    // trunk() should resolve to the correct commit after the rename
+    let output = local_dir.run_jj(["log", "-r", "trunk()", "-T", "description"]);
+    insta::assert_snapshot!(output, @"
+    ◆  init
+    │
+    ~
+    [EOF]
+    ");
+}
+
+#[test]
+fn test_git_remote_with_preset_config() {
+    let test_env = TestEnvironment::default();
+    // Add user-level config which shouldn't be renamed
+    test_env.add_config(indoc! {r#"
+        remotes.origin.fetch-bookmarks = "user-origin"
+        remotes.foo.fetch-bookmarks = "user-foo"
+        remotes.bar.fetch-tags = "user-bar"
+    "#});
+
+    // Set up default branch at remote
+    let remote_repo = git::init(test_env.env_root().join("remote"));
+    git::add_commit(&remote_repo, "refs/heads/main", "file", b"", "init", &[]);
+    git::set_symbolic_reference(&remote_repo, "HEAD", "refs/heads/main");
+
+    // Clone the repo, add another remote to ensure that only the target remote
+    // settings will be updated
+    test_env
+        .run_jj_in(
+            ".",
+            [
+                "git",
+                "clone",
+                "--branch=main",
+                "--tag=~*",
+                "remote",
+                "local",
+            ],
+        )
+        .success();
+    let local_dir = test_env.work_dir("local");
+    local_dir
+        .run_jj(["git", "remote", "add", "bar", "../remote"])
+        .success();
+    local_dir
+        .run_jj([
+            "config",
+            "set",
+            "--repo",
+            "remotes.bar.fetch-bookmarks",
+            "repo-bar",
+        ])
+        .success();
+
+    let list_remotes_config =
+        || local_dir.run_jj(["config", "list", "--include-overridden", "remotes"]);
+    let list_trunk_config = || local_dir.run_jj(["config", "list", "revset-aliases.'trunk()'"]);
+    insta::assert_snapshot!(list_remotes_config(), @r#"
+    # remotes.origin.fetch-bookmarks = "user-origin"
+    remotes.foo.fetch-bookmarks = "user-foo"
+    remotes.bar.fetch-tags = "user-bar"
+    remotes.origin.fetch-bookmarks = "main"
+    remotes.origin.fetch-tags = "~*"
+    remotes.bar.fetch-bookmarks = "repo-bar"
+    [EOF]
+    "#);
+    insta::assert_snapshot!(list_trunk_config(), @r#"
+    revset-aliases.'trunk()' = "main@origin"
+    [EOF]
+    "#);
+
+    // Preset repo-level config should be updated automatically
+    let output = local_dir.run_jj(["git", "remote", "rename", "origin", "foo"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Updating the revset alias `trunk()` to `main@foo`.
+    [EOF]
+    ");
+    insta::assert_snapshot!(list_remotes_config(), @r#"
+    remotes.origin.fetch-bookmarks = "user-origin"
+    # remotes.foo.fetch-bookmarks = "user-foo"
+    remotes.bar.fetch-tags = "user-bar"
+    remotes.foo.fetch-bookmarks = "main"
+    remotes.foo.fetch-tags = "~*"
+    remotes.bar.fetch-bookmarks = "repo-bar"
+    [EOF]
+    "#);
+    insta::assert_snapshot!(list_trunk_config(), @r#"
+    revset-aliases.'trunk()' = "main@foo"
+    [EOF]
+    "#);
+
+    // Preset repo-level config should be removed automatically
+    // TODO: suppress warning about unresolvable trunk()
+    let output = local_dir.run_jj(["git", "remote", "remove", "foo"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Resetting the revset alias `trunk()` to default value.
+    [EOF]
+    ");
+    insta::assert_snapshot!(list_remotes_config(), @r#"
+    remotes.origin.fetch-bookmarks = "user-origin"
+    remotes.foo.fetch-bookmarks = "user-foo"
+    remotes.bar.fetch-tags = "user-bar"
+    remotes.bar.fetch-bookmarks = "repo-bar"
+    [EOF]
+    "#);
+    insta::assert_snapshot!(list_trunk_config(), @r"
+    ------- stderr -------
+    Warning: No matching config key for: revset-aliases.'trunk()'
+    [EOF]
+    ");
+
+    // Set trunk to non-default value, which shouldn't be updated automatically
+    local_dir
+        .run_jj([
+            "config",
+            "set",
+            "--repo",
+            "revset-aliases.'trunk()'",
+            "main@custom-remote",
+        ])
+        .success();
+    let output = local_dir.run_jj(["git", "remote", "rename", "bar", "foo"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Warning: Failed to resolve `revset-aliases.trunk()`: Revision `main@custom-remote` doesn't exist
+    The `trunk()` alias is temporarily set to `root()`.
+    Hint: Use `jj config edit --repo` to adjust the `trunk()` alias.
+    [EOF]
+    ");
+    insta::assert_snapshot!(list_remotes_config(), @r#"
+    remotes.origin.fetch-bookmarks = "user-origin"
+    # remotes.foo.fetch-bookmarks = "user-foo"
+    remotes.bar.fetch-tags = "user-bar"
+    remotes.foo.fetch-bookmarks = "repo-bar"
+    [EOF]
+    "#);
+    insta::assert_snapshot!(list_trunk_config(), @r#"
+    revset-aliases.'trunk()' = "main@custom-remote"
+    [EOF]
+    "#);
+
+    let output = local_dir.run_jj(["git", "remote", "remove", "foo"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Warning: Failed to resolve `revset-aliases.trunk()`: Revision `main@custom-remote` doesn't exist
+    The `trunk()` alias is temporarily set to `root()`.
+    Hint: Use `jj config edit --repo` to adjust the `trunk()` alias.
+    [EOF]
+    ");
+    insta::assert_snapshot!(list_remotes_config(), @r#"
+    remotes.origin.fetch-bookmarks = "user-origin"
+    remotes.foo.fetch-bookmarks = "user-foo"
+    remotes.bar.fetch-tags = "user-bar"
+    [EOF]
+    "#);
+    insta::assert_snapshot!(list_trunk_config(), @r#"
+    revset-aliases.'trunk()' = "main@custom-remote"
+    [EOF]
     "#);
 }
 
@@ -531,9 +797,9 @@ fn test_git_remote_named_git() {
     ");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = false
     	logallrefupdates = true
+    	repositoryformatversion = 0
     [remote "bar"]
     	url = http://example.com/repo/repo
     	fetch = +refs/heads/*:refs/remotes/bar/*
@@ -562,9 +828,9 @@ fn test_git_remote_named_git() {
     work_dir.run_jj(["git", "init", "--git-repo=."]).success();
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = false
     	logallrefupdates = true
+    	repositoryformatversion = 0
     [remote "git"]
     	url = http://example.com/repo/repo
     	fetch = +refs/heads/*:refs/remotes/git/*
@@ -577,9 +843,9 @@ fn test_git_remote_named_git() {
     insta::assert_snapshot!(output, @"");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @"
     [core]
-    	repositoryformatversion = 0
     	bare = false
     	logallrefupdates = true
+    	repositoryformatversion = 0
     ");
     // @git bookmark shouldn't be removed.
     let output = work_dir.run_jj(["log", "-rmain@git", "-Tbookmarks"]);
@@ -691,9 +957,9 @@ fn test_git_remote_with_branch_config() -> TestResult {
 
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [branch "test"]
     	remote = bar
     	merge = refs/heads/test
@@ -747,9 +1013,9 @@ fn test_git_remote_with_global_git_remote_config() {
     insta::assert_snapshot!(output, @"");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [remote "bar"]
     	url = htps://example.com/repo/foo
     	fetch = +refs/heads/*:refs/remotes/bar/*
@@ -790,14 +1056,39 @@ fn test_git_remote_with_global_git_remote_config() {
     ");
     insta::assert_snapshot!(read_git_config(work_dir.root()), @r#"
     [core]
-    	repositoryformatversion = 0
     	bare = true
     	logallrefupdates = false
+    	repositoryformatversion = 0
     [remote "bar"]
     	url = htps://example.com/repo/foo
     	fetch = +refs/heads/*:refs/remotes/bar/*
     [remote "origin"]
     	url = https://example.com/repo/origin/2
     	fetch = +refs/heads/*:refs/remotes/origin/*
+    "#);
+}
+
+#[test]
+fn test_git_remote_name_validation() {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    // Invalid remote name is rejected (detailed validation tested in jj-lib)
+    let output = work_dir.run_jj([
+        "git",
+        "remote",
+        "add",
+        "my remote",
+        "http://example.com/repo",
+    ]);
+    insta::assert_snapshot!(output, @r#"
+    ------- stderr -------
+    Error: Invalid Git remote name
+    Caused by:
+    1: remote names must be valid within refspecs for fetching: "my remote"
+    2: Reference name contains invalid byte: " "
+    [EOF]
+    [exit status: 1]
     "#);
 }

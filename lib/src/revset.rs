@@ -26,6 +26,7 @@ use std::sync::LazyLock;
 
 use futures::Stream;
 use futures::StreamExt as _;
+use futures::future::LocalBoxFuture;
 use futures::stream::LocalBoxStream;
 use itertools::Itertools as _;
 use pollster::FutureExt as _;
@@ -159,8 +160,6 @@ pub enum RevsetCommitRef {
         symbol: RemoteRefSymbolExpression,
         remote_ref_state: Option<RemoteRefState>,
     },
-    GitRefs,
-    GitHead,
 }
 
 /// String expressions to match `name@remote` bookmarks/tags.
@@ -314,7 +313,9 @@ pub enum RevsetExpression<St: ExpressionState> {
         filter: Arc<Self>,
     },
     Roots(Arc<Self>),
+    Forks,
     ForkPoint(Arc<Self>),
+    MergePoint(Arc<Self>),
     Bisect(Arc<Self>),
     HasSize {
         candidates: Arc<Self>,
@@ -341,6 +342,8 @@ pub enum RevsetExpression<St: ExpressionState> {
         commits: Vec<CommitId>,
     },
     /// Resolves visibility within the specified repo state.
+    ///
+    /// Commits referenced by the `candidates` expression are also scoped.
     WithinVisibility {
         candidates: Arc<Self>,
         /// Copy of `repo.view().heads()` at the operation.
@@ -377,6 +380,10 @@ impl<St: ExpressionState> RevsetExpression<St> {
 
     pub fn root() -> Arc<Self> {
         Arc::new(Self::Root)
+    }
+
+    pub fn forks() -> Arc<Self> {
+        Arc::new(Self::Forks)
     }
 
     pub fn commit(commit_id: CommitId) -> Arc<Self> {
@@ -456,14 +463,6 @@ impl<St: ExpressionState<CommitRef = RevsetCommitRef>> RevsetExpression<St> {
             symbol,
             remote_ref_state,
         }))
-    }
-
-    pub fn git_refs() -> Arc<Self> {
-        Arc::new(Self::CommitRef(RevsetCommitRef::GitRefs))
-    }
-
-    pub fn git_head() -> Arc<Self> {
-        Arc::new(Self::CommitRef(RevsetCommitRef::GitHead))
     }
 }
 
@@ -560,6 +559,11 @@ impl<St: ExpressionState> RevsetExpression<St> {
         Arc::new(Self::ForkPoint(self.clone()))
     }
 
+    /// Merge point (best common descendants) of `self`.
+    pub fn merge_point(self: &Arc<Self>) -> Arc<Self> {
+        Arc::new(Self::MergePoint(self.clone()))
+    }
+
     /// Commits with ~half of the descendants in `self`.
     pub fn bisect(self: &Arc<Self>) -> Arc<Self> {
         Arc::new(Self::Bisect(self.clone()))
@@ -609,6 +613,18 @@ impl<St: ExpressionState> RevsetExpression<St> {
             heads: heads.clone(),
             generation: GENERATION_RANGE_FULL,
             parents_range: PARENTS_RANGE_FULL,
+        })
+    }
+
+    /// Resolves visibility within the given repo.
+    ///
+    /// This is equivalent to `at_operation(repo.op_id(), self)`, except that
+    /// `CommitRef`s are resolved separately. Commits referenced by the `self`
+    /// expression are also scoped.
+    pub fn within_visibility(self: &Arc<Self>, repo: &dyn Repo) -> Arc<Self> {
+        Arc::new(Self::WithinVisibility {
+            candidates: self.clone(),
+            visible_heads: repo.view().heads().iter().cloned().collect(),
         })
     }
 
@@ -768,7 +784,14 @@ pub enum ResolvedExpression {
         filter: Option<ResolvedPredicateExpression>,
     },
     Roots(Box<Self>),
+    Forks {
+        heads: Box<Self>,
+    },
     ForkPoint(Box<Self>),
+    MergePoint {
+        roots: Box<Self>,
+        visible_heads: Box<Self>,
+    },
     Bisect(Box<Self>),
     HasSize {
         candidates: Box<Self>,
@@ -922,10 +945,10 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
         })?;
         Ok(RevsetExpression::commit_id_prefix(prefix))
     });
-    map.insert("bookmarks", |diagnostics, function, context| {
+    map.insert("bookmarks", |diagnostics, function, _context| {
         let ([], [opt_arg]) = function.expect_arguments()?;
         let expr = if let Some(arg) = opt_arg {
-            expect_string_expression(diagnostics, arg, context)?
+            expect_string_expression(diagnostics, arg)?
         } else {
             StringExpression::all()
         };
@@ -952,10 +975,10 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
             Ok(RevsetExpression::remote_bookmarks(symbol, state))
         },
     );
-    map.insert("tags", |diagnostics, function, context| {
+    map.insert("tags", |diagnostics, function, _context| {
         let ([], [opt_arg]) = function.expect_arguments()?;
         let expr = if let Some(arg) = opt_arg {
-            expect_string_expression(diagnostics, arg, context)?
+            expect_string_expression(diagnostics, arg)?
         } else {
             StringExpression::all()
         };
@@ -978,24 +1001,6 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
         let state = Some(RemoteRefState::New);
         Ok(RevsetExpression::remote_tags(symbol, state))
     });
-    // TODO: Remove in jj 0.43+
-    map.insert("git_refs", |diagnostics, function, _context| {
-        diagnostics.add_warning(RevsetParseError::expression(
-            "git_refs() is deprecated; use remote_bookmarks()/tags() instead",
-            function.name_span,
-        ));
-        function.expect_no_arguments()?;
-        Ok(RevsetExpression::git_refs())
-    });
-    // TODO: Remove in jj 0.43+
-    map.insert("git_head", |diagnostics, function, _context| {
-        diagnostics.add_warning(RevsetParseError::expression(
-            "git_head() is deprecated; use first_parent(@) instead",
-            function.name_span,
-        ));
-        function.expect_no_arguments()?;
-        Ok(RevsetExpression::git_head())
-    });
     map.insert("latest", |diagnostics, function, context| {
         let ([candidates_arg], [count_opt_arg]) = function.expect_arguments()?;
         let candidates = lower_expression(diagnostics, candidates_arg, context)?;
@@ -1010,6 +1015,11 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
         let [expression_arg] = function.expect_exact_arguments()?;
         let expression = lower_expression(diagnostics, expression_arg, context)?;
         Ok(RevsetExpression::fork_point(&expression))
+    });
+    map.insert("merge_point", |diagnostics, function, context| {
+        let [expression_arg] = function.expect_exact_arguments()?;
+        let expression = lower_expression(diagnostics, expression_arg, context)?;
+        Ok(RevsetExpression::merge_point(&expression))
     });
     map.insert("bisect", |diagnostics, function, context| {
         let [expression_arg] = function.expect_exact_arguments()?;
@@ -1028,35 +1038,39 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
             RevsetFilterPredicate::ParentCount(2..u32::MAX),
         ))
     });
-    map.insert("description", |diagnostics, function, context| {
+    map.insert("forks", |_diagnostics, function, _context| {
+        function.expect_no_arguments()?;
+        Ok(RevsetExpression::forks())
+    });
+    map.insert("description", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::Description(expr);
         Ok(RevsetExpression::filter(predicate))
     });
-    map.insert("subject", |diagnostics, function, context| {
+    map.insert("subject", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::Subject(expr);
         Ok(RevsetExpression::filter(predicate))
     });
-    map.insert("author", |diagnostics, function, context| {
+    map.insert("author", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let name_predicate = RevsetFilterPredicate::AuthorName(expr.clone());
         let email_predicate = RevsetFilterPredicate::AuthorEmail(expr);
         Ok(RevsetExpression::filter(name_predicate)
             .union(&RevsetExpression::filter(email_predicate)))
     });
-    map.insert("author_name", |diagnostics, function, context| {
+    map.insert("author_name", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::AuthorName(expr);
         Ok(RevsetExpression::filter(predicate))
     });
-    map.insert("author_email", |diagnostics, function, context| {
+    map.insert("author_email", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::AuthorEmail(expr);
         Ok(RevsetExpression::filter(predicate))
     });
@@ -1081,23 +1095,23 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
         let predicate = RevsetFilterPredicate::AuthorEmail(StringExpression::pattern(pattern));
         Ok(RevsetExpression::filter(predicate))
     });
-    map.insert("committer", |diagnostics, function, context| {
+    map.insert("committer", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let name_predicate = RevsetFilterPredicate::CommitterName(expr.clone());
         let email_predicate = RevsetFilterPredicate::CommitterEmail(expr);
         Ok(RevsetExpression::filter(name_predicate)
             .union(&RevsetExpression::filter(email_predicate)))
     });
-    map.insert("committer_name", |diagnostics, function, context| {
+    map.insert("committer_name", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::CommitterName(expr);
         Ok(RevsetExpression::filter(predicate))
     });
-    map.insert("committer_email", |diagnostics, function, context| {
+    map.insert("committer_email", |diagnostics, function, _context| {
         let [arg] = function.expect_exact_arguments()?;
-        let expr = expect_string_expression(diagnostics, arg, context)?;
+        let expr = expect_string_expression(diagnostics, arg)?;
         let predicate = RevsetFilterPredicate::CommitterEmail(expr);
         Ok(RevsetExpression::filter(predicate))
     });
@@ -1132,7 +1146,7 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
             ));
         }
         let ([text_arg], [files_opt_arg]) = function.expect_arguments()?;
-        let text = expect_string_expression(diagnostics, text_arg, context)?;
+        let text = expect_string_expression(diagnostics, text_arg)?;
         let files = expand_optional_files_arg(files_opt_arg, diagnostics, context)?;
         let predicate = RevsetFilterPredicate::DiffLines {
             text,
@@ -1143,7 +1157,7 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
     });
     map.insert("diff_lines_added", |diagnostics, function, context| {
         let ([text_arg], [files_opt_arg]) = function.expect_arguments()?;
-        let text = expect_string_expression(diagnostics, text_arg, context)?;
+        let text = expect_string_expression(diagnostics, text_arg)?;
         let files = expand_optional_files_arg(files_opt_arg, diagnostics, context)?;
         let predicate = RevsetFilterPredicate::DiffLines {
             text,
@@ -1154,7 +1168,7 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
     });
     map.insert("diff_lines_removed", |diagnostics, function, context| {
         let ([text_arg], [files_opt_arg]) = function.expect_arguments()?;
-        let text = expect_string_expression(diagnostics, text_arg, context)?;
+        let text = expect_string_expression(diagnostics, text_arg)?;
         let files = expand_optional_files_arg(files_opt_arg, diagnostics, context)?;
         let predicate = RevsetFilterPredicate::DiffLines {
             text,
@@ -1247,39 +1261,18 @@ pub fn expect_fileset_expression(
 pub fn expect_string_expression(
     diagnostics: &mut RevsetDiagnostics,
     node: &ExpressionNode,
-    context: &LoweringContext,
-) -> Result<StringExpression, RevsetParseError> {
-    let default_kind = if context.use_glob_by_default {
-        "glob"
-    } else {
-        "substring"
-    };
-    expect_string_expression_inner(diagnostics, node, default_kind)
-}
-
-fn expect_string_expression_inner(
-    diagnostics: &mut RevsetDiagnostics,
-    node: &ExpressionNode,
-    // TODO: remove this parameter with ui.revsets-use-glob-by-default
-    default_kind: &str,
 ) -> Result<StringExpression, RevsetParseError> {
     revset_parser::catch_aliases(diagnostics, node, |diagnostics, node| {
         let expr_error = || RevsetParseError::expression("Invalid string expression", node.span);
         let pattern_error = || RevsetParseError::expression("Invalid string pattern", node.span);
-        let default_pattern = |diagnostics: &mut RevsetDiagnostics, value: &str| {
-            if default_kind == "substring" {
-                diagnostics.add_warning(RevsetParseError::expression(
-                    "ui.revsets-use-glob-by-default=false will be removed in a future release",
-                    node.span,
-                ));
-            }
-            let pattern = StringPattern::from_str_kind(value, default_kind)
-                .map_err(|err| pattern_error().with_source(err))?;
+        let default_pattern = |value: &str| {
+            let pattern =
+                StringPattern::glob(value).map_err(|err| pattern_error().with_source(err))?;
             Ok(StringExpression::pattern(pattern))
         };
         match &node.kind {
-            ExpressionKind::Identifier(value) => default_pattern(diagnostics, value),
-            ExpressionKind::String(value) => default_pattern(diagnostics, value),
+            ExpressionKind::Identifier(value) => default_pattern(value),
+            ExpressionKind::String(value) => default_pattern(value),
             ExpressionKind::Pattern(pattern) => {
                 let value = revset_parser::expect_string_literal("string", &pattern.value)?;
                 let pattern = StringPattern::from_str_kind(value, pattern.name)
@@ -1292,7 +1285,7 @@ fn expect_string_expression_inner(
             | ExpressionKind::DagRangeAll
             | ExpressionKind::RangeAll => Err(expr_error()),
             ExpressionKind::Unary(op, arg_node) => {
-                let arg = expect_string_expression_inner(diagnostics, arg_node, default_kind)?;
+                let arg = expect_string_expression(diagnostics, arg_node)?;
                 match op {
                     UnaryOp::Negate => Ok(arg.negated()),
                     UnaryOp::DagRangePre
@@ -1304,8 +1297,8 @@ fn expect_string_expression_inner(
                 }
             }
             ExpressionKind::Binary(op, lhs_node, rhs_node) => {
-                let lhs = expect_string_expression_inner(diagnostics, lhs_node, default_kind)?;
-                let rhs = expect_string_expression_inner(diagnostics, rhs_node, default_kind)?;
+                let lhs = expect_string_expression(diagnostics, lhs_node)?;
+                let rhs = expect_string_expression(diagnostics, rhs_node)?;
                 match op {
                     BinaryOp::Intersection => Ok(lhs.intersection(rhs)),
                     BinaryOp::Difference => Ok(lhs.intersection(rhs.negated())),
@@ -1315,7 +1308,7 @@ fn expect_string_expression_inner(
             ExpressionKind::UnionAll(nodes) => {
                 let expressions = nodes
                     .iter()
-                    .map(|node| expect_string_expression_inner(diagnostics, node, default_kind))
+                    .map(|node| expect_string_expression(diagnostics, node))
                     .try_collect()?;
                 Ok(StringExpression::union_all(expressions))
             }
@@ -1348,12 +1341,12 @@ fn parse_remote_refs_arguments(
 ) -> Result<RemoteRefSymbolExpression, RevsetParseError> {
     let ([], [name_opt_arg, remote_opt_arg]) = function.expect_named_arguments(&["", "remote"])?;
     let name = if let Some(name_arg) = name_opt_arg {
-        expect_string_expression(diagnostics, name_arg, context)?
+        expect_string_expression(diagnostics, name_arg)?
     } else {
         StringExpression::all()
     };
     let remote = if let Some(remote_arg) = remote_opt_arg {
-        expect_string_expression(diagnostics, remote_arg, context)?
+        expect_string_expression(diagnostics, remote_arg)?
     } else if let Some(remote) = context.default_ignored_remote {
         StringExpression::exact(remote).negated()
     } else {
@@ -1469,8 +1462,7 @@ pub fn parse_string_expression(
     text: &str,
 ) -> Result<StringExpression, RevsetParseError> {
     let node = parse_program(text)?;
-    let default_kind = "glob";
-    expect_string_expression_inner(diagnostics, &node, default_kind)
+    expect_string_expression(diagnostics, &node)
 }
 
 /// Constructs binary tree from `expressions` list, `unit` node, and associative
@@ -1609,8 +1601,12 @@ fn try_transform_expression<St: ExpressionState, E>(
             RevsetExpression::Roots(candidates) => {
                 transform_rec(candidates, pre, post)?.map(RevsetExpression::Roots)
             }
+            RevsetExpression::Forks => None,
             RevsetExpression::ForkPoint(expression) => {
                 transform_rec(expression, pre, post)?.map(RevsetExpression::ForkPoint)
+            }
+            RevsetExpression::MergePoint(expression) => {
+                transform_rec(expression, pre, post)?.map(RevsetExpression::MergePoint)
             }
             RevsetExpression::Bisect(expression) => {
                 transform_rec(expression, pre, post)?.map(RevsetExpression::Bisect)
@@ -1855,9 +1851,14 @@ where
             let roots = folder.fold_expression(roots)?;
             RevsetExpression::Roots(roots).into()
         }
+        RevsetExpression::Forks => RevsetExpression::Forks.into(),
         RevsetExpression::ForkPoint(expression) => {
             let expression = folder.fold_expression(expression)?;
             RevsetExpression::ForkPoint(expression).into()
+        }
+        RevsetExpression::MergePoint(expression) => {
+            let expression = folder.fold_expression(expression)?;
+            RevsetExpression::MergePoint(expression).into()
         }
         RevsetExpression::Bisect(expression) => {
             let expression = folder.fold_expression(expression)?;
@@ -1865,11 +1866,8 @@ where
         }
         RevsetExpression::HasSize { candidates, count } => {
             let candidates = folder.fold_expression(candidates)?;
-            RevsetExpression::HasSize {
-                candidates,
-                count: *count,
-            }
-            .into()
+            let count = *count;
+            RevsetExpression::HasSize { candidates, count }.into()
         }
         RevsetExpression::Latest { candidates, count } => {
             let candidates = folder.fold_expression(candidates)?;
@@ -1948,6 +1946,15 @@ where
 fn resolve_referenced_commits<St: ExpressionState>(
     expression: &Arc<RevsetExpression<St>>,
 ) -> TransformedExpression<St> {
+    // Omit empty node to keep test/debug output concise
+    let omit_empty = true;
+    resolve_referenced_commits_sub(expression, omit_empty)
+}
+
+fn resolve_referenced_commits_sub<St: ExpressionState>(
+    expression: &Arc<RevsetExpression<St>>,
+    omit_empty: bool,
+) -> TransformedExpression<St> {
     // Trust precomputed value if any
     if matches!(
         expression.as_ref(),
@@ -1974,12 +1981,15 @@ fn resolve_referenced_commits<St: ExpressionState>(
             } => {
                 // ::visible_heads shouldn't be filtered out by outer
                 inner_commits.extend_from_slice(visible_heads);
-                let transformed = resolve_referenced_commits(candidates);
+                // Empty WithinReference node shouldn't be omitted because
+                // at_operation() creates a new resolution scope.
+                let transformed = resolve_referenced_commits_sub(candidates, false);
                 // Referenced commits shouldn't be filtered out by outer
-                if let RevsetExpression::WithinReference { commits, .. } =
-                    transformed.as_deref().unwrap_or(candidates)
-                {
-                    inner_commits.extend_from_slice(commits);
+                match transformed.as_deref().unwrap_or(candidates) {
+                    RevsetExpression::WithinReference { commits, .. } => {
+                        inner_commits.extend_from_slice(commits);
+                    }
+                    _ => unreachable!("WithinReference should never be omitted"),
                 }
                 ControlFlow::Break(transformed.map(|candidates| {
                     Arc::new(RevsetExpression::WithinVisibility {
@@ -2001,8 +2011,7 @@ fn resolve_referenced_commits<St: ExpressionState>(
     // Commits could be deduplicated here, but they'll be concatenated with
     // the visible heads later, which may have duplicates.
     outer_commits.extend(inner_commits);
-    if outer_commits.is_empty() {
-        // Omit empty node to keep test/debug output concise
+    if omit_empty && outer_commits.is_empty() {
         return transformed;
     }
     Some(Arc::new(RevsetExpression::WithinReference {
@@ -2631,7 +2640,6 @@ fn reload_repo_at_operation(
             RepoLoaderError::Backend(err) => RevsetResolutionError::Backend(err),
             RepoLoaderError::Index(_)
             | RepoLoaderError::IndexStore(_)
-            | RepoLoaderError::OpHeadResolution(_)
             | RepoLoaderError::OpHeadsStoreError(_)
             | RepoLoaderError::OpStore(_)
             | RepoLoaderError::TransactionCommit(_) => RevsetResolutionError::Other(err.into()),
@@ -2737,27 +2745,7 @@ impl PartialSymbolResolver for BookmarkResolver {
     }
 }
 
-struct GitRefResolver;
-
-impl PartialSymbolResolver for GitRefResolver {
-    fn resolve_symbol(
-        &self,
-        repo: &dyn Repo,
-        symbol: &str,
-    ) -> Result<Option<CommitId>, RevsetResolutionError> {
-        let view = repo.view();
-        for git_ref_prefix in &["", "refs/"] {
-            let target = view.get_git_ref([git_ref_prefix, symbol].concat().as_ref());
-            if let Some(id) = to_resolved_ref("git_ref", symbol, target)? {
-                return Ok(Some(id));
-            }
-        }
-        Ok(None)
-    }
-}
-
-const DEFAULT_RESOLVERS: &[&dyn PartialSymbolResolver] =
-    &[&TagResolver, &BookmarkResolver, &GitRefResolver];
+const DEFAULT_RESOLVERS: &[&dyn PartialSymbolResolver] = &[&TagResolver, &BookmarkResolver];
 
 struct CommitPrefixResolver<'a> {
     context_repo: &'a dyn Repo,
@@ -2822,6 +2810,7 @@ impl ChangePrefixResolver<'_> {
             .unwrap_or(IdPrefixIndex::empty());
         match index
             .resolve_change_prefix(repo, prefix)
+            .block_on()
             .map_err(|err| RevsetResolutionError::Other(err.into()))?
         {
             PrefixResolution::AmbiguousMatch => Err(
@@ -3043,14 +3032,6 @@ fn resolve_commit_ref(
                 .collect();
             Ok(commit_ids)
         }
-        RevsetCommitRef::GitRefs => {
-            let mut commit_ids = vec![];
-            for ref_target in repo.view().git_refs().values() {
-                commit_ids.extend(ref_target.added_ids().cloned());
-            }
-            Ok(commit_ids)
-        }
-        RevsetCommitRef::GitHead => Ok(repo.view().git_head().added_ids().cloned().collect()),
     }
 }
 
@@ -3123,12 +3104,9 @@ impl ExpressionStateFolder<UserExpressionState, ResolvedExpressionState>
         let repo = reload_repo_at_operation(self.repo(), operation)?;
         self.repo_stack.push(repo);
         let candidates = self.fold_expression(candidates)?;
-        let visible_heads = self.repo().view().heads().iter().cloned().collect();
+        let expression = candidates.within_visibility(self.repo());
         self.repo_stack.pop();
-        Ok(Arc::new(RevsetExpression::WithinVisibility {
-            candidates,
-            visible_heads,
-        }))
+        Ok(expression)
     }
 }
 
@@ -3158,6 +3136,7 @@ fn resolve_visibility(
         referenced_commits: &[],
         visible_heads: &repo.view().heads().iter().cloned().collect_vec(),
         root: repo.store().root_commit_id(),
+        is_heads_normalized: repo.view().is_heads_normalized(),
     };
     context.resolve(expression)
 }
@@ -3167,6 +3146,7 @@ struct VisibilityResolutionContext<'a> {
     referenced_commits: &'a [CommitId],
     visible_heads: &'a [CommitId],
     root: &'a CommitId,
+    is_heads_normalized: bool,
 }
 
 impl VisibilityResolutionContext<'_> {
@@ -3236,9 +3216,16 @@ impl VisibilityResolutionContext<'_> {
             RevsetExpression::Roots(candidates) => {
                 ResolvedExpression::Roots(self.resolve(candidates).into())
             }
+            RevsetExpression::Forks => ResolvedExpression::Forks {
+                heads: self.resolve_visible_heads_or_referenced().into(),
+            },
             RevsetExpression::ForkPoint(expression) => {
                 ResolvedExpression::ForkPoint(self.resolve(expression).into())
             }
+            RevsetExpression::MergePoint(expression) => ResolvedExpression::MergePoint {
+                roots: self.resolve(expression).into(),
+                visible_heads: self.resolve_visible_heads_or_referenced().into(),
+            },
             RevsetExpression::Bisect(expression) => {
                 ResolvedExpression::Bisect(self.resolve(expression).into())
             }
@@ -3273,6 +3260,7 @@ impl VisibilityResolutionContext<'_> {
                     referenced_commits: commits,
                     visible_heads: self.visible_heads,
                     root: self.root,
+                    is_heads_normalized: self.is_heads_normalized,
                 };
                 context.resolve(candidates)
             }
@@ -3284,6 +3272,7 @@ impl VisibilityResolutionContext<'_> {
                     referenced_commits: self.referenced_commits,
                     visible_heads,
                     root: self.root,
+                    is_heads_normalized: self.is_heads_normalized,
                 };
                 context.resolve(candidates)
             }
@@ -3333,7 +3322,12 @@ impl VisibilityResolutionContext<'_> {
     }
 
     fn resolve_visible_heads(&self) -> ResolvedExpression {
-        ResolvedExpression::Commits(self.visible_heads.to_owned())
+        let visible_heads = ResolvedExpression::Commits(self.visible_heads.to_owned());
+        if self.is_heads_normalized {
+            visible_heads
+        } else {
+            ResolvedExpression::Heads(visible_heads.into())
+        }
     }
 
     fn resolve_visible_heads_or_referenced(&self) -> ResolvedExpression {
@@ -3375,7 +3369,9 @@ impl VisibilityResolutionContext<'_> {
             | RevsetExpression::Heads(_)
             | RevsetExpression::HeadsRange { .. }
             | RevsetExpression::Roots(_)
+            | RevsetExpression::Forks
             | RevsetExpression::ForkPoint(_)
+            | RevsetExpression::MergePoint(_)
             | RevsetExpression::Bisect(_)
             | RevsetExpression::HasSize { .. }
             | RevsetExpression::Latest { .. } => {
@@ -3423,11 +3419,6 @@ impl VisibilityResolutionContext<'_> {
 }
 
 pub trait Revset: fmt::Debug {
-    /// Iterate in topological order with children before parents.
-    fn iter<'a>(&self) -> Box<dyn Iterator<Item = Result<CommitId, RevsetEvaluationError>> + 'a>
-    where
-        Self: 'a;
-
     /// Streams in topological order with children before parents.
     // TODO: Relax to BoxStream?
     fn stream<'a>(&self) -> LocalBoxStream<'a, Result<CommitId, RevsetEvaluationError>>
@@ -3437,15 +3428,7 @@ pub trait Revset: fmt::Debug {
     /// Iterates commit/change id pairs in topological order.
     fn commit_change_ids<'a>(
         &self,
-    ) -> Box<dyn Iterator<Item = Result<(CommitId, ChangeId), RevsetEvaluationError>> + 'a>
-    where
-        Self: 'a;
-
-    /// Iterates graphs nodes (commit ID and edges) in topological order with
-    /// children before parents.
-    fn iter_graph<'a>(
-        &self,
-    ) -> Box<dyn Iterator<Item = Result<GraphNode<CommitId>, RevsetEvaluationError>> + 'a>
+    ) -> LocalBoxStream<'a, Result<(CommitId, ChangeId), RevsetEvaluationError>>
     where
         Self: 'a;
 
@@ -3457,8 +3440,8 @@ pub trait Revset: fmt::Debug {
     where
         Self: 'a;
 
-    /// Returns true if iterator will emit no commit nor error.
-    fn is_empty(&self) -> bool;
+    /// Returns true if iterator will emit no commit.
+    fn is_empty(&self) -> Result<bool, RevsetEvaluationError>;
 
     /// Inclusive lower bound and, optionally, inclusive upper bound of how many
     /// commits are in the revset. The implementation can use its discretion as
@@ -3477,31 +3460,8 @@ pub trait Revset: fmt::Debug {
 }
 
 /// Function that checks if a commit is contained within the revset.
-pub type RevsetContainingFn<'a> = dyn Fn(&CommitId) -> Result<bool, RevsetEvaluationError> + 'a;
-
-pub trait RevsetIteratorExt {
-    fn commits(
-        self,
-        store: &Arc<Store>,
-    ) -> impl Iterator<Item = Result<Commit, RevsetEvaluationError>> + use<Self>;
-}
-
-impl<I: Iterator<Item = Result<CommitId, RevsetEvaluationError>>> RevsetIteratorExt for I {
-    fn commits(
-        self,
-        store: &Arc<Store>,
-    ) -> impl Iterator<Item = Result<Commit, RevsetEvaluationError>> + use<I> {
-        let store = store.clone();
-        self.map(move |result| {
-            let commit_id = result?;
-            let commit = store
-                .clone()
-                .get_commit(&commit_id)
-                .map_err(RevsetEvaluationError::Backend)?;
-            Ok(commit)
-        })
-    }
-}
+pub type RevsetContainingFn<'a> =
+    dyn Fn(&CommitId) -> LocalBoxFuture<'a, Result<bool, RevsetEvaluationError>> + 'a;
 
 pub trait RevsetStreamExt {
     fn commits(
@@ -3575,7 +3535,6 @@ pub struct RevsetParseContext<'a> {
     /// Special remote that should be ignored by default. (e.g. "git")
     pub default_ignored_remote: Option<&'a RemoteName>,
     pub fileset_aliases_map: &'a FilesetAliasesMap,
-    pub use_glob_by_default: bool,
     pub extensions: &'a RevsetExtensions,
     pub workspace: Option<RevsetWorkspaceContext<'a>>,
 }
@@ -3589,7 +3548,6 @@ impl<'a> RevsetParseContext<'a> {
             date_pattern_context,
             default_ignored_remote,
             fileset_aliases_map,
-            use_glob_by_default,
             extensions,
             workspace,
         } = *self;
@@ -3598,7 +3556,6 @@ impl<'a> RevsetParseContext<'a> {
             date_pattern_context,
             default_ignored_remote,
             fileset_aliases_map,
-            use_glob_by_default,
             extensions,
             workspace,
         }
@@ -3612,7 +3569,6 @@ pub struct LoweringContext<'a> {
     date_pattern_context: DatePatternContext,
     default_ignored_remote: Option<&'a RemoteName>,
     fileset_aliases_map: &'a FilesetAliasesMap,
-    use_glob_by_default: bool,
     extensions: &'a RevsetExtensions,
     workspace: Option<RevsetWorkspaceContext<'a>>,
 }
@@ -3700,7 +3656,7 @@ mod tests {
     ) -> Result<Arc<UserRevsetExpression>, RevsetParseError> {
         let mut aliases_map = RevsetAliasesMap::new();
         for (decl, defn) in aliases {
-            aliases_map.insert(decl, defn)?;
+            aliases_map.insert(decl, defn, None)?;
         }
         let context = RevsetParseContext {
             aliases_map: &aliases_map,
@@ -3709,7 +3665,6 @@ mod tests {
             date_pattern_context: chrono::Utc::now().fixed_offset().into(),
             default_ignored_remote: Some("ignored".as_ref()),
             fileset_aliases_map: &FilesetAliasesMap::new(),
-            use_glob_by_default: true,
             extensions: &RevsetExtensions::default(),
             workspace: None,
         };
@@ -3732,7 +3687,7 @@ mod tests {
         };
         let mut aliases_map = RevsetAliasesMap::new();
         for (decl, defn) in aliases {
-            aliases_map.insert(decl, defn)?;
+            aliases_map.insert(decl, defn, None)?;
         }
         let context = RevsetParseContext {
             aliases_map: &aliases_map,
@@ -3741,7 +3696,6 @@ mod tests {
             date_pattern_context: chrono::Utc::now().fixed_offset().into(),
             default_ignored_remote: Some("ignored".as_ref()),
             fileset_aliases_map: &FilesetAliasesMap::new(),
-            use_glob_by_default: true,
             extensions: &RevsetExtensions::default(),
             workspace: Some(workspace_ctx),
         };
@@ -4661,7 +4615,9 @@ mod tests {
         )
         "#);
 
-        // Inner scope has no references, so WithinReference should be omitted.
+        // Inner scope has no references, but WithinReference isn't omitted
+        // because commits referenced by sibling expressions shouldn't be
+        // visible to the inner expression.
         insta::assert_debug_snapshot!(
             resolve_referenced_commits(
                 &visibility2
@@ -4673,7 +4629,10 @@ mod tests {
                 candidates: Union(
                     Intersection(
                         WithinVisibility {
-                            candidates: Filter(HasConflict),
+                            candidates: WithinReference {
+                                candidates: Filter(HasConflict),
+                                commits: [],
+                            },
                             visible_heads: [
                                 CommitId("200000"),
                             ],
@@ -4723,7 +4682,10 @@ mod tests {
                                 ],
                             },
                             WithinVisibility {
-                                candidates: Filter(HasConflict),
+                                candidates: WithinReference {
+                                    candidates: Filter(HasConflict),
+                                    commits: [],
+                                },
                                 visible_heads: [
                                     CommitId("200000"),
                                 ],
@@ -4967,7 +4929,10 @@ mod tests {
             })), @r#"
         WithinReference {
             candidates: WithinVisibility {
-                candidates: CommitRef(Bookmarks(Pattern(Substring("")))),
+                candidates: WithinReference {
+                    candidates: CommitRef(Bookmarks(Pattern(Substring("")))),
+                    commits: [],
+                },
                 visible_heads: [
                     CommitId("012345"),
                 ],

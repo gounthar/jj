@@ -16,6 +16,541 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New features
 
+* `jj bisect` will now mention when it cannot unambiguously find the first bad
+  revision due to skips in evaluation.
+
+* Git HEAD state is now tracked per worktree internally. This prepares
+  colocated repositories for support of multiple Git worktrees, where each
+  jj workspace can have its own Git HEAD. Existing repositories are migrated
+  automatically.
+
+### Fixed bugs
+
+* The default pager flags now include `-K` (`--quit-on-intr`), so pressing
+  Ctrl+C in `less` exits cleanly instead of leaving the terminal in a
+  corrupted state (raw mode, visible escape sequences, broken input).
+
+* A side of a conflict whose contents end with a carriage return no longer loses
+  that byte when the materialized conflict is parsed back, such as when a
+  conflicted file is snapshotted from the working copy.
+  [#9868](https://github.com/jj-vcs/jj/issues/9868)
+
+* In colocated workspaces, `jj workspace update-stale` now correctly resets the
+  Git HEAD to the parent of the fresh working-copy commit.
+  [#9936](https://github.com/jj-vcs/jj/issues/9936)
+
+* `jj run` no longer runs against the remaining revisions if a process exits
+  with a nonzero exit code.
+
+* Fixed crash in `jj log` involving hidden revisions and the
+  `log-graph-prioritize` revset.
+  [#9975](https://github.com/jj-vcs/jj/issues/9975)
+
+## [0.44.0] - 2026-08-05
+
+### Release highlights
+
+* Support for fetching and pushing tags has now been stabilized. Tags can be
+  tracked or untracked just like bookmarks. Tracked tags are pushed by default.
+
+### Breaking changes
+
+* `jj git fetch` now fetches tags the same way it fetches bookmarks. Tags are
+  fetched as `<name>@<remote>`, and these remote tags are automatically tracked
+  by local tags of the same name. Running `jj git fetch` in an existing
+  repository will re-fetch all tags to initialize the tracking state.
+
+  Git's `tagOpt` is no longer respected. To disable tag fetching, set
+  `remotes.<name>.fetch-tags = '~*'` in the jj configuration.
+
+* `jj git clone --fetch-tags=all|none|included` is removed in favor of
+  `--tag=PATTERN`.
+
+* `jj git push --all` now pushes all tags in addition to bookmarks.
+
+* The `WorkspaceRef.root()` and `RepoPath.absolute()` template functions now
+  return `Option<FsPath>` and `FsPath` respectively, instead of `String`. The
+  `path` keyword in `jj config list` templates now returns `Option<FsPath>`.
+
+* `jj file search` now prints every matched line prefixed by the file path,
+  instead of only the file paths of files containing a match. Use
+  `--name-only` for the previous behavior.
+  [#9399](https://github.com/jj-vcs/jj/issues/9399)
+
+* Passing an argument more than once is no longer an error. The last occurrence
+  wins, so `jj --no-pager --no-pager version` and `jj log -n 5 -n 10` now work,
+  and an argument baked into an alias or a wrapper can be given explicitly as
+  well. Arguments that can be specified multiple times, such as `--config` and
+  `jj log -r`, are unaffected and still collect all of their values.
+  [#8101](https://github.com/jj-vcs/jj/issues/8101)
+  [#9859](https://github.com/jj-vcs/jj/issues/9859)
+
+### Deprecations
+
+None
+
+### New features
+
+* New `merge_point()` revset function which (similar to `fork_point`) finds the
+  point where multiple branches merge.
+
+* `jj workspace list` now shows workspace roots by default. The output can be
+  customized with `templates.workspace_list` or `-T`, and `WorkspaceRef.root()`
+  returns an optional `FsPath` value.
+  [#9713](https://github.com/jj-vcs/jj/pull/9713),
+  [#9826](https://github.com/jj-vcs/jj/pull/9826)
+
+* New `try(expr, fallback...)` template function to suppress runtime errors.
+
+* `jj run` now processes revisions from oldest to newest by default. The start
+  order is guaranteed: each revision begins execution only after the previous
+  one has started, even with `--jobs` higher than 1.
+
+* `jj run` gained a `--passthrough` flag that connects the subprocess's
+  stdout/stderr directly to the terminal instead of capturing output.
+
+* `jj run` gained a `--ignore-changes` flag to avoid editing any revisions even
+  if the command modifies the working copy.
+
+* `jj run` gained a `--ignore-errors` flag to continue running against the
+  remaining revisions even if the command exits with a nonzero exit code.
+
+* `jj file search` now supports `-n`/`--line-number` to prefix each match with
+  its 1-based line number within the file.
+
+* `jj git push` gained a `--allow-conflicts` flag to allow pushing commits
+  containing conflicts.
+
+* New `jj tag track`/`untrack` commands to associate local tags with remotes.
+  Note that fetched tags are tracked by default.
+
+* Added `builtin_log()` revset alias for the built-in default `jj log` revset.
+  `revsets.log` now defaults to `builtin_log()`, so custom log revsets can
+  reuse the built-in default instead of copying its full expression.
+
+* Added config option `diff.stat.max-bar-width` for use with `--stat` to limit
+  the `++--` bar width. In the templating language, `diff.stat()` can optionally
+  take a second (positional or named) argument `max_bar_width` for an equivalent
+  effect.
+
+* `jj absorb` now supports `--interactive`/`-i`/`--tool` to let you
+  interactively choose which hunks from the source to consider for absorption.
+  This is useful when you only want to absorb *part* of a commit without first
+  splitting it. Any hunks that are not selected or cannot be absorbed remain in
+  the source commit.
+
+### Fixed bugs
+
+* Recursive alias definitions are detected more precisely. jj can now expand
+  aliases that are simply repeated. For example, with the alias `jj = []`, the
+  command `jj jj jj` will resolve to `jj`. Aliases can also fall back to the
+  default command. For example, with the alias `i = ["--ignore-working-copy"]`,
+  `jj i` will resolve to `jj --ignore-working-copy`.
+
+* Git temporary files are now cleaned up more reliably in the presence of
+  signals (e.g. `Ctrl-C`). This should reduce the rate of "Could not acquire
+  lock for index file" errors.
+  ([#7530](https://github.com/jj-vcs/jj/issues/7530))
+
+* Fixed Git HEAD mismatch after the working copy became immutable.
+  [#9827](https://github.com/jj-vcs/jj/issues/9827)
+
+* `jj` now creates a new working-copy revision as soon as the one of the current
+  workspace becomes immutable, as well as during snapshotting. This brings the
+  behavior closer to `jj` 0.42 and earlier.
+
+* Snapshotting no longer fails if the working copy contains a path whose name
+  isn't valid UTF-8. Such paths can't be tracked, so they are now skipped and
+  reported as a warning instead.
+  [#9774](https://github.com/jj-vcs/jj/issues/9774)
+
+* Fixed failure when reading configuration in copied repo with an empty
+  repo-level configuration directory.
+
+* `jj diff` and `jj status` no longer omit a rename or copy in a merge commit
+  when the renamed source is present in more than one parent. The identical copy
+  record reported for each parent was mistaken for a conflict and discarded.
+  [#9752](https://github.com/jj-vcs/jj/issues/9752)
+
+* `jj run` no longer panics when its revset includes a conflicted commit. The
+  conflict is now preserved in the rewritten commit.
+  [#9747](https://github.com/jj-vcs/jj/issues/9747)
+
+* Fixed a panic when passing overly-large length parameters to ID templater
+  functions (`commit_id.short()`, `commit_id.shortest()`, etc.).
+  [#9833](https://github.com/jj-vcs/jj/issues/9833)
+
+* `jj git import` and `export` in colocated workspaces are now disabled by
+  default. These commands usually do nothing, but they had a race condition.
+
+### Contributors
+
+Thanks to the people who made this release happen!
+
+* Aaron Bies (@slerpyyy)
+* Ada Alakbarova (@ada4a)
+* Alexandre Hallaine (@alexandre-hallaine)
+* Amaan Qureshi (@amaanq)
+* Austin Seipp (@thoughtpolice)
+* Caleb White (@calebdw)
+* Chawye Hsu (@chawyehsu)
+* David Rieber (@drieber)
+* Gaëtan Lehmann (@glehmann)
+* hexbinoct (@hexbinoct)
+* ivelieu (@ivelieu)
+* Joseph Lou (@josephlou5)
+* Josh McKinney (@joshka)
+* Josh Steadmon (@steadmon)
+* Kevin Liao (@kevincliao)
+* Luna Schwalbe (@lunagl)
+* Martin von Zweigbergk (@martinvonz)
+* Matt Van Horn (@mvanhorn)
+* Nika Layzell (@mystor)
+* Niko Savola (@nikosavola)
+* Nitzan Raz (@BackSlasher)
+* Noah Lev (@camelid)
+* OlshaMB (@OlshaMB)
+* Philip Metzger (@PhilipMetzger)
+* Remo Senekowitsch (@senekor)
+* Rob Pilling (@bobrippling)
+* Stephen Jennings (@jennings)
+* Techcable (@Techcable)
+* TogarashiPepper (@TogarashiPepper)
+* Vladimir Petrzhikovskii (@0xdeafbeef)
+* Waleed Khan (@arxanas)
+* Wang Yuantao (@0WD0)
+* xtqqczze (@xtqqczze)
+* Yash Bavadiya (@xevrion)
+* Yuya Nishihara (@yuja)
+
+## [0.43.0] - 2026-07-01
+
+### Release highlights
+
+* `jj run` allows you to run a command over a set of changes, each with their
+  own private working copy; the commands may update the working copy and
+  changes/conflicts are propagated accordingly, e.g., `jj run -- cargo check
+  --all-features` or `jj run -- cargo fix` behaves as one might expect.
+
+### Breaking changes
+
+* The deprecated `git_head()` and `git_refs()` functions have been removed from
+  revsets and templates.
+
+* Git-like symbols (e.g. `refs/heads/main`) are no longer resolved to
+  revisions. Use the bookmark/tag `<name>` or `<name>@<remote>` syntax instead.
+
+* The deprecated `ui.revsets-use-glob-by-default` option has been removed.
+
+* `jj bookmark track`/`untrack` no longer supports `<kind>:<bookmark>@<remote>`
+  patterns. However, the `<bookmark>@<remote>` symbol syntax is still supported.
+  [#9226](https://github.com/jj-vcs/jj/issues/9226)
+
+### Deprecations
+
+### New features
+
+* `jj show` now supports `--reversed` flag.
+
+* `jj` now looks for config files in `/etc/jj`.
+
+* `jj config gc` will delete configuration of deleted/moved repos from
+  `~/.config/jj/repos` folder.
+  [#9362](https://github.com/jj-vcs/jj/issues/9362)
+
+* `jj run` allows you to run a command over a set of changes, each with their
+  own private working copy; the commands may update the working copy and
+  changes/conflicts are propagated accordingly, e.g., `jj run -- cargo check
+  --all-features` or `jj run -- cargo fix` behaves as one might expect.
+
+* `jj gerrit upload` now supports the `-o` (`--option`) flag, which works like
+  `git push -o` (`--push-option`).
+
+* `jj git fetch` now rebases the descendants of revisions that were rewritten
+  based on their change IDs. Previously, when multiple bookmarked revisions
+  existed in a stack, those rewritten revisions and their descendants wouldn't
+  always be rebased. Note that immutable descendants will not be rebased.
+
+* Add a `forks()` revset function that yields all commits with more than 1 child.
+
+* `colors` config now supports crossed-out text styling with
+  `{ crossed-out = true }`.
+
+### Fixed bugs
+
+* On Windows, querying a path's file identity no longer follows symbolic links,
+  matching the behavior on Unix. Previously a symlink shared the identity of its
+  target, so two symlinks pointing at the same target were treated as the same
+  file. This identity check is used when writing the working copy to detect
+  aliases of the reserved `.git` and `.jj` directories.
+  [#8924](https://github.com/jj-vcs/jj/issues/8924)
+
+* `jj` now creates a new working-copy revision during snapshotting if the
+  working copy was immutable. Previously, the new revision was created
+  immediately after the working copy became immutable.
+  [#7751](https://github.com/jj-vcs/jj/issues/7751)
+  [#9338](https://github.com/jj-vcs/jj/issues/9338)
+
+* `jj git remote add` now warns if the new remote exactly matches an existing
+  remote's fetch URL or effective push URL.
+  [#413](https://github.com/jj-vcs/jj/issues/413)
+
+* Fixed corrupt loose Git objects on Intel Raptor Lake CPU and aarch64.
+  Previously, jj could report a successful commit even though `git fsck` would
+  later fail with `incorrect data check`, `corrupt loose object`, or `missing
+  blob`, and later jj operations could fail with `corrupt deflate stream`.
+
+### Contributors
+
+Thanks to the people who made this release happen!
+
+* adlerd (@adlerd)
+* ase (@adamse)
+* Atakan Yenel (@atakanyenel)
+* Austin Seipp (@thoughtpolice)
+* Benjamin Tan (@bnjmnt4n)
+* David Rieber (@drieber)
+* figsoda (@figsoda)
+* Gaëtan Lehmann (@glehmann)
+* hexbinoct (@hexbinoct)
+* Jakub Stasiak (@jstasiak)
+* Jonas Carpay (@jonascarpay)
+* Joseph Lou (@josephlou5)
+* Josh McKinney (@joshka)
+* Josh Steadmon (@steadmon)
+* Martin von Zweigbergk (@martinvonz)
+* Matt Stark (@matts1)
+* Philip Metzger (@PhilipMetzger)
+* shoce (@shoce)
+* Stephen Jennings (@jennings)
+* Thomas Axelsson (@thomas-2nd)
+* Vincent Ging Ho Yim (@cenviity)
+* Yuya Nishihara (@yuja)
+
+## [0.42.0] - 2026-06-04
+
+### Release highlights
+
+* Switched to the mimalloc memory allocator for better multi-threaded
+  performance.
+
+### Breaking changes
+
+* The following deprecated command options have been removed:
+  - `jj commit --reset-author`/`--author`
+  - `jj describe --no-edit`/`--edit`/`--reset-author`/`--author`
+  - `jj git push --allow-new`
+  - `jj metaedit --update-committer-timestamp`
+
+* The following deprecated config options have been removed:
+  - `git.auto-local-bookmark`
+  - `git.push-new-bookmarks`
+
+### Deprecations
+
+* `jj evolog` no longer supports legacy commit predecessors recorded in `jj` <
+  0.30.
+
+### New features
+
+
+* Shell completions now surface descriptions for custom aliases,
+  revset-aliases, template-aliases, and fileset-aliases. Descriptions are
+  extracted from the `.doc` field of the alias definition if it is a table
+  with `.doc` and `.definition` properties.
+
+* `jj show` now accepts multiple revisions, showing all of them one after the
+  other, behaving closer to `git show`.
+
+* `jj git fetch` now generates evolution history based on change IDs. If change
+  IDs are preserved by the remote, local descendant revisions will be rebased
+  onto the rewritten parents.
+
+* Added `jj util backend name` command that prints the commit backend being used
+  in the current repo.
+
+* Added `edit-invocation-mode` config option for diff editors (e.g.
+  `jj diffedit`, `jj split`). When set to `"file-by-file"`, the editor is
+  launched once per changed file, making it possible to use per-file tools like
+  `vimdiff` for editing.
+
+### Fixed bugs
+
+* `jj git remote add` now reports an error instead of panicking when the
+  remote name is empty or contains whitespace.
+  [#9099](https://github.com/jj-vcs/jj/issues/9099)
+
+* Color-words diffs are now shown as separate before and after lines when color
+  output is disabled, making piped or redirected diffs readable.
+  [#5894](https://github.com/jj-vcs/jj/issues/5894)
+
+* `jj bookmark forget` no longer prints `Forgot N local bookmarks.` when no
+  local bookmarks were actually forgotten (e.g. when only an untracked remote
+  bookmark matched). [#9181](https://github.com/jj-vcs/jj/issues/9181).
+
+* The `builtin_log_redacted` template now also redacts workspace names.
+
+### Contributors
+
+Thanks to the people who made this release happen!
+
+* Alex Jaspersen (@ajaspers)
+* Archer (@archer-321)
+* ase (@adamse)
+* Austin Seipp (@thoughtpolice)
+* David Rieber (@drieber)
+* Eyüp Can Akman (@eyupcanakman)
+* Jakub Stasiak (@jstasiak)
+* James Dixon (@lemonase)
+* Joseph Lou (@josephlou5)
+* Laurynas Keturakis (@laulauland)
+* Luna Schwalbe (@lunagl)
+* Martin von Zweigbergk (@martinvonz)
+* Niko Savola (@nikosavola)
+* OlshaMB (@OlshaMB)
+* Sergey Kasmy (@SergeyKasmy)
+* truffle (@truffle-dev)
+* Vincent Ging Ho Yim (@cenviity)
+* Yuya Nishihara (@yuja)
+
+## [0.41.0] - 2026-05-06
+
+### Release highlights
+
+* `jj fix` now supports formatting specific line ranges (allowing you to format
+  only modified lines); see the configuration manual and notes below for more.
+
+* The new global flag `--no-integrate-operation` will let you run a command without
+  impacting the repo state or the working copy, which is useful when automated tools
+  may create snapshots in the background.
+
+### Breaking changes
+
+* The `--pattern` flag for `file search` now defaults to `regex:` instead of `glob:`.
+
+* `jj git push --all`/`--tracked`/`-r REVSETS` no longer fails when revisions to
+  push are private or have conflicts. Bookmarks which aren't eligible to push
+  will be skipped.
+
+* Branch/bookmark patterns passed to `jj git clone` are now saved to jj's repo
+  settings file instead of `.git/config`. Git fetch refspecs are set to the
+  default value.
+
+### Deprecations
+
+* In the templating language, the `Operation` type's `.tags()` function has been
+  deprecated in favor of `.attributes()`.
+
+### New features
+
+* The `--pattern` flag for `file search` now accepts various pattern kinds through
+  `kind:pattern` syntax.
+
+* A new global flag `--no-integrate-operation` lets you run a command without
+  impacting the repo state or the working copy.
+
+* A new config option `diff.git.show-path-prefix` can be used to suppress the
+  `a/` and `b/` path prefixes in the `diff --git` output.
+
+* `jj fix` now supports line range-limited formatting via the `fix.tools.<name>.line-range-arg`
+  and `run-tool-if-zero-line-ranges` configs. This allows running tools only on modified
+  lines and fine-grained control over when the tool is run. If you have set the `line-range-arg`
+  config, use `--all-lines` to match the previous behavior of formatting the entire file.
+
+* A new `replace(pattern, content, replacement)` template function is added
+  which supports replacement of content in templates, using a lambda to format
+  replacement text. It supports all string patterns, including regexes with
+  capture groups (e.g. `replace(regex:'(\w+) (\w+)', "hello world", |c| c.get(1) ++ " " ++ c.get(2))`).
+
+* New `ByteString` template type for things like file content.
+
+* `jj gerrit upload` now supports the new options `--message` (`-m`), `--edit`
+  and `--merged`. You can now also pass multiple hashtags by repeating the
+  `--hashtag` option.
+
+* New `remotes.<name>.fetch-bookmarks`/`fetch-tags` options to [configure
+  default fetch targets.](docs/config.md#default-bookmarks-and-tags-to-fetch)
+
+* `JJ_PAGER` can now override the `ui.pager` config, matching `JJ_EDITOR` for
+  callers that need a jj-specific environment override.
+
+### Fixed bugs
+
+* Improving consistency with `git` handling of `.gitignore`, including `/`
+  after entries and `\r\r\n` for MacOS files.
+
+* `jj status` filters untracked paths by fileset
+  [#9287](https://github.com/jj-vcs/jj/issues/9287)
+
+* Improved performance for snapshotting, visibly improving `jj status`
+  speed for large repositories.
+
+* Pre-existing Git submodule directories are no longer considered conflicts in
+  checkouts. [#8065](https://github.com/jj-vcs/jj/issues/8065).
+
+* Fixed a panic in `jj gerrit upload` when run without `-r` and the
+  inferred revision was immutable. [#9398](https://github.com/jj-vcs/jj/issues/9398)
+
+* `jj status` respects path filters in working copy summaries.
+
+* `jj git remote rename`/`remove` now updates the `trunk()` alias.
+
+* Commands would sometimes incorrectly diagnose a stale working copy and suggest
+  running `jj op integrate` when it would have no effect. This should now be
+  much less likely to happen in practice.
+  [#9314](https://github.com/jj-vcs/jj/issues/9314)
+
+### Contributors
+
+Thanks to the people who made this release happen!
+
+* Adrian Freund (@freundTech)
+* ase (@adamse)
+* Austin Seipp (@thoughtpolice)
+* Benjamin Tan (@bnjmnt4n)
+* Björn Kautler (@Vampire)
+* David Higgs (@higgsd)
+* David Rieber (@drieber)
+* dzaima (@dzaima)
+* Federico G. Schwindt (@fgsch)
+* Gaëtan Lehmann (@glehmann)
+* hewigovens (@hewigovens)
+* Ilya Grigoriev (@ilyagr)
+* jonmeow (@jonmeow)
+* Joseph Lou (@josephlou5)
+* Josh McKinney (@joshka)
+* Jun Mukai (@jmuk)
+* Lucas Garron (@lgarron)
+* Martin von Zweigbergk (@martinvonz)
+* Matt Stark (@matts1)
+* Maximilian Gaß (@mxey)
+* OlshaMB (@OlshaMB)
+* Philip Metzger (@PhilipMetzger)
+* rayaq
+* Remo Senekowitsch (@senekor)
+* rishiad (@rishiad)
+* Ryan Patterson (@CGamesPlay)
+* Sebastian Barfurth (@sbarfurth)
+* Thomas Axelsson (@thomasa88)
+* xtqqczze (@xtqqczze)
+* Yuya Nishihara (@yuja)
+
+## [0.40.0] - 2026-04-01
+
+### Release highlights
+
+None
+
+### Breaking changes
+
+None
+
+### Deprecations
+
+None
+
+### New features
+
 * New `diff_lines_added()` and `diff_lines_removed()` revset functions for
   matching content on only one side of a diff.
 
@@ -53,6 +588,39 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * `.gitignore` with UTF-8 BOM can now be parsed correctly.
 
 * Fix incompatibility with gpgsm 2.5.x.
+
+### Contributors
+
+Thanks to the people who made this release happen!
+
+* Aaron Sutton (@aaronjsutton)
+* Adam Sandberg Eriksson (@adamse)
+* Anton Älgmyr (@algmyr)
+* Austin Seipp (@thoughtpolice)
+* Benjamin Tan (@bnjmnt4n)
+* Ben Warren (@warrenbhw)
+* Bryant Chandler (@brychanrobot)
+* David Higgs (@higgsd)
+* Filip Weiss (@fiws)
+* Gabriel Goller (@kaffarell)
+* Gaëtan Lehmann (@glehmann)
+* Ilya Grigoriev (@ilyagr)
+* Jeff Turner (@jefft)
+* Joseph Lou (@josephlou5)
+* Josh Steadmon (@steadmon)
+* KITAGAWA Yasutaka (@kit494way)
+* Liam (@terror)
+* Li-Wen Hsu (@lwhsu)
+* Martin von Zweigbergk (@martinvonz)
+* Philip Metzger (@PhilipMetzger)
+* Poliorcetics (@poliorcetics)
+* Remo Senekowitsch (@senekor)
+* Rob Pilling (@bobrippling)
+* Scott Taylor (@scott2000)
+* Shnatu
+* Stephen Prater (@stephenprater)
+* Yuya Nishihara (@yuja)
+* Zeyi Fan (@fanzeyi)
 
 ## [0.39.0] - 2026-03-04
 
@@ -656,7 +1224,7 @@ Thanks to the people who made this release happen!
 * `RepoPath` template type now has a `absolute() -> String` method that returns
   the absolute path as a string.
 
-* Added `format_path(path)` template that controls how file paths are printed
+* Added `format_path(path)` template alias that controls how file paths are printed
   with `jj file list`.
 
 * New built-in revset aliases `visible()` and `hidden()`.
@@ -828,7 +1396,7 @@ Thanks to the people who made this release happen!
 
 * `jj bisect run` accepts the command and arguments to pass to the command
   directly as positional arguments, such as
-  `jj bisect --range=..main -- cargo check --all-targets`.
+  `jj bisect run --range=..main -- cargo check --all-targets`.
 
 * Divergent changes are no longer marked red in immutable revisions. Since the
   revision is immutable, the user shouldn't take any action, so the red color
@@ -4914,7 +5482,12 @@ No changes, only trying to get the automated build to work.
 
 Last release before this changelog started.
 
-[unreleased]: https://github.com/jj-vcs/jj/compare/v0.39.0...HEAD
+[unreleased]: https://github.com/jj-vcs/jj/compare/v0.44.0...HEAD
+[0.44.0]: https://github.com/jj-vcs/jj/compare/v0.43.0...v0.44.0
+[0.43.0]: https://github.com/jj-vcs/jj/compare/v0.42.0...v0.43.0
+[0.42.0]: https://github.com/jj-vcs/jj/compare/v0.41.0...v0.42.0
+[0.41.0]: https://github.com/jj-vcs/jj/compare/v0.40.0...v0.41.0
+[0.40.0]: https://github.com/jj-vcs/jj/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/jj-vcs/jj/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/jj-vcs/jj/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/jj-vcs/jj/compare/v0.36.0...v0.37.0

@@ -277,7 +277,10 @@ pub fn template_aliases() -> Vec<CompletionCandidate> {
         };
         Ok(template_aliases
             .symbol_names()
-            .map(CompletionCandidate::new)
+            .map(|name| {
+                let doc = template_aliases.get_symbol(name).unwrap().2;
+                CompletionCandidate::new(name).help(doc.map(|doc| doc.to_owned().into()))
+            })
             .sorted()
             .collect())
     })
@@ -292,7 +295,14 @@ pub fn aliases() -> Vec<CompletionCandidate> {
             // aliases don't need to be completed and they would only clutter
             // the output of `jj <TAB>`.
             .filter(|alias| alias.len() > 2)
-            .map(CompletionCandidate::new)
+            .map(|alias| {
+                CompletionCandidate::new(alias).help(
+                    settings
+                        .get_string(["aliases", alias, "doc"])
+                        .ok()
+                        .map(|doc| doc.into()),
+                )
+            })
             .collect())
     })
 }
@@ -303,8 +313,9 @@ fn revisions(match_prefix: &str, revset_filter: Option<&str>) -> Vec<CompletionC
         const LOCAL_BOOKMARK: usize = 0;
         const TAG: usize = 1;
         const CHANGE_ID: usize = 2;
-        const REMOTE_BOOKMARK: usize = 3;
-        const REVSET_ALIAS: usize = 4;
+        const WORKSPACE: usize = 3;
+        const REMOTE_BOOKMARK: usize = 4;
+        const REVSET_ALIAS: usize = 5;
 
         let mut candidates = Vec::new();
 
@@ -371,6 +382,37 @@ fn revisions(match_prefix: &str, revset_filter: Option<&str>) -> Vec<CompletionC
             }));
         }
 
+        // workspace names
+
+        let output = jj
+            .build()
+            .arg("workspace")
+            .arg("list")
+            .arg("--template")
+            .arg(r#"name ++ "\n""#)
+            .output()
+            .map_err(user_error)?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // If there's only one workspace, the user can just use `@`, and they may even
+        // be confused if they see `default@` as an option.
+        if stdout.lines().count() > 1 {
+            candidates.extend(stdout.lines().filter_map(|name| {
+                let symbol = format!("{name}@");
+                if symbol.starts_with(match_prefix) {
+                    Some(
+                        CompletionCandidate::new(symbol)
+                            .help(Some(
+                                format!("The working copy for workspace `{name}`").into(),
+                            ))
+                            .display_order(Some(WORKSPACE)),
+                    )
+                } else {
+                    None
+                }
+            }));
+        }
+
         // change IDs
 
         let revisions = revset_filter
@@ -426,9 +468,11 @@ fn revisions(match_prefix: &str, revset_filter: Option<&str>) -> Vec<CompletionC
                 .into_iter()
                 .filter(|symbol| symbol.starts_with(match_prefix))
                 .map(|symbol| {
-                    let (_, defn) = revset_aliases.get_symbol(symbol).unwrap();
+                    let (_, defn, doc) = revset_aliases.get_symbol(symbol).unwrap();
+                    // Prefer TOML `.doc` over definition text
+                    let help: String = doc.map(|s| s.to_owned()).unwrap_or_else(|| defn.clone());
                     CompletionCandidate::new(symbol)
-                        .help(Some(defn.into()))
+                        .help(Some(help.into()))
                         .display_order(Some(REVSET_ALIAS))
                 }),
         );
@@ -1115,6 +1159,7 @@ fn get_jj_command() -> Result<(JjBuilder, UserSettings), CommandError> {
     // No config migration for completion. Simply ignore deprecated variables.
     let mut config_env = ConfigEnv::from_environment();
     let maybe_cwd_workspace_loader = DefaultWorkspaceLoaderFactory.create(find_workspace_dir(&cwd));
+    config_env.reload_system_config(&mut raw_config).ok();
     config_env.reload_user_config(&mut raw_config).ok();
     if let Ok(loader) = &maybe_cwd_workspace_loader {
         config_env.reset_repo_path(loader.repo_path());

@@ -81,7 +81,7 @@ pub(crate) async fn cmd_file_show(
     command: &CommandHelper,
     args: &FileShowArgs,
 ) -> Result<(), CommandError> {
-    let workspace_command = command.workspace_helper(ui)?;
+    let workspace_command = command.workspace_helper(ui).await?;
     let commit = workspace_command
         .resolve_single_rev(ui, &args.revision)
         .await?;
@@ -192,7 +192,7 @@ async fn write_tree_entries(
                 let ui_path = workspace_command.format_file_path(&entry.path);
                 writeln!(
                     ui.warning_default(),
-                    "Path '{ui_path}' exists but is not a file"
+                    "Path '{ui_path}' exists but is not a file."
                 )?;
             }
             MaterializedTreeValue::Tree(_) => panic!("entries should not contain trees"),

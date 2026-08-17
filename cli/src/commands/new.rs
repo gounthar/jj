@@ -17,6 +17,7 @@ use std::io::Write as _;
 
 use bstr::ByteVec as _;
 use clap_complete::ArgValueCompleter;
+use futures::future::try_join_all;
 use indexmap::IndexSet;
 use itertools::Itertools as _;
 use jj_lib::backend::CommitId;
@@ -134,7 +135,6 @@ pub(crate) struct NewArgs {
     /// Example: `jj new --insert-after A --insert-before D`:
     ///
     /// ```text
-    /// 
     ///     D            D
     ///     |           / \
     ///     C          |   C
@@ -164,7 +164,7 @@ pub(crate) async fn cmd_new(
     command: &CommandHelper,
     args: &NewArgs,
 ) -> Result<(), CommandError> {
-    let mut workspace_command = command.workspace_helper(ui)?;
+    let mut workspace_command = command.workspace_helper(ui).await?;
 
     let revision_args = match (&args.revisions_pos, &args.revisions_opt) {
         (None, None) => (args.insert_before.is_none() && args.insert_after.is_none())
@@ -185,10 +185,12 @@ pub(crate) async fn cmd_new(
         "new commit",
     )
     .await?;
-    let parent_commits: Vec<_> = parent_commit_ids
-        .iter()
-        .map(|commit_id| workspace_command.repo().store().get_commit(commit_id))
-        .try_collect()?;
+    let parent_commits = try_join_all(
+        parent_commit_ids
+            .iter()
+            .map(|commit_id| workspace_command.repo().store().get_commit_async(commit_id)),
+    )
+    .await?;
     let mut advance_bookmarks_target = None;
     let mut advanceable_bookmarks = vec![];
 
@@ -234,10 +236,12 @@ pub(crate) async fn cmd_new(
     }
     let new_commit = commit_builder.write(tx.repo_mut()).await?;
 
-    let child_commits: Vec<_> = child_commit_ids
-        .iter()
-        .map(|commit_id| tx.repo().store().get_commit(commit_id))
-        .try_collect()?;
+    let child_commits = try_join_all(
+        child_commit_ids
+            .iter()
+            .map(|commit_id| tx.repo().store().get_commit_async(commit_id)),
+    )
+    .await?;
     let mut num_rebased = 0;
     for child_commit in child_commits {
         let mut new_parent_ids = IndexSet::new();
@@ -269,12 +273,12 @@ pub(crate) async fn cmd_new(
         // The description of the new commit will be printed by tx.finish()
     }
     if num_rebased > 0 {
-        writeln!(ui.status(), "Rebased {num_rebased} descendant commits")?;
+        writeln!(ui.status(), "Rebased {num_rebased} descendant commits.")?;
     }
 
     // Does nothing if there's no bookmarks to advance.
     if let Some(target) = advance_bookmarks_target {
-        tx.advance_bookmarks(advanceable_bookmarks, &target)?;
+        tx.advance_bookmarks(advanceable_bookmarks, &target).await?;
     }
 
     tx.finish(ui, "new empty commit").await?;

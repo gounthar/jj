@@ -44,14 +44,7 @@ concat(
 
 tag_list = 'format_commit_ref(self, "tag") ++ "\n"'
 
-workspace_list = '''
-concat(
-  name,
-  ": ",
-  format_commit_summary_with_refs(target, format_commit_ref_names(target.bookmarks())),
-  "\n",
-)
-'''
+workspace_list = 'builtin_workspace_list'
 
 op_summary = '''
 separate(" ",
@@ -302,6 +295,19 @@ label(if(op.current_operation(), "current_operation"),
 )
 '''
 
+builtin_workspace_list = '''
+concat(
+  name,
+  ": ",
+  separate(
+    " ",
+    if(root, root.relative()),
+    format_commit_summary_with_refs(target, format_commit_ref_names(target.bookmarks())),
+  ),
+  "\n",
+)
+'''
+
 default_commit_description = '""'
 empty_commit_marker = 'label("empty", "(empty)")'
 description_placeholder = '''
@@ -438,7 +444,7 @@ concat(
     format_time_range(op.time()),
   ), "\n",
   op.description().first_line(), "\n",
-  surround("", "\n", op.tags()),
+  surround("", "\n", op.attributes()),
 )
 '''
 'format_operation_redacted(op)' = '''
@@ -450,7 +456,7 @@ concat(
     format_time_range(op.time()),
   ), "\n",
   op.description().first_line(), "\n",
-  if(op.tags(), "(redacted)\n"),
+  if(op.attributes(), "(redacted)\n"),
 )
 '''
 'format_workspace_redacted(workspace)' = '''
@@ -466,7 +472,7 @@ join(" ", root.id().short(), label("root", "root()")) ++ "\n"
 separate(" ",
   format_short_operation_id(op.id()), op.user(), op.workspace_name(), format_time_range(op.time()),
   op.description().first_line(),
-  op.tags(),
+  op.attributes(),
 ) ++ "\n"
 '''
 'format_snapshot_operation_oneline(op)' = 'format_operation_oneline(op)'
@@ -533,7 +539,7 @@ separate(" ",
     )
   )),
   commit.tags().map(|tag| concat("tag-", hash(tag.name()).substr(0, 4))),
-  commit.working_copies(),
+  commit.working_copies().map(|workspace| format_workspace_redacted(workspace)),
   format_short_commit_id(commit.commit_id()),
   format_commit_labels(commit),
   if(config("ui.show-cryptographic-signatures").as_boolean(),

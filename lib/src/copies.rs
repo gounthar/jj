@@ -30,6 +30,7 @@ use futures::stream::Fuse;
 use futures::stream::FuturesOrdered;
 use indexmap::IndexMap;
 use indexmap::IndexSet;
+use itertools::Itertools as _;
 use pollster::FutureExt as _;
 
 use crate::backend::BackendError;
@@ -37,11 +38,11 @@ use crate::backend::BackendResult;
 use crate::backend::CopyHistory;
 use crate::backend::CopyId;
 use crate::backend::CopyRecord;
+use crate::backend::MergedTreeValue;
 use crate::backend::TreeValue;
 use crate::dag_walk;
 use crate::merge::Diff;
 use crate::merge::Merge;
-use crate::merge::MergedTreeValue;
 use crate::merge::SameChange;
 use crate::merged_tree::MergedTree;
 use crate::merged_tree::TreeDiffEntry;
@@ -64,6 +65,18 @@ impl CopyRecords {
     /// conflicts is discarded and treated as not having an origin.
     pub fn add_records(&mut self, copy_records: impl IntoIterator<Item = CopyRecord>) {
         for r in copy_records {
+            // The same copy or rename is reported once per parent when diffing a
+            // merge commit. Identical (source, target) pairs describe the same
+            // operation, so skip the duplicate instead of marking both maps as
+            // conflicting, which would otherwise drop the copy/rename entirely.
+            let is_duplicate = self
+                .targets
+                .get(&r.target)
+                .and_then(|&i| self.records.get(i))
+                .is_some_and(|existing| existing.source == r.source);
+            if is_duplicate {
+                continue;
+            }
             self.sources
                 .entry(r.source.clone())
                 // TODO: handle conflicts instead of ignoring both sides.
@@ -255,7 +268,10 @@ fn collect_descendants(copy_graph: &CopyGraph) -> IndexMap<CopyId, IndexSet<Copy
         copy_graph.keys(),
         |id| *id,
         |id| copy_graph[*id].parents.iter(),
-    );
+    )
+    .into_iter()
+    .sorted()
+    .collect_vec();
     for id in dag_walk::topo_order_forward(
         heads,
         |id| *id,
@@ -652,7 +668,7 @@ async fn find_diff_sources_from_copies(
     // return both A and B instead? I don't think there's a way to do that with
     // the current dag_walk functions. Do we care enough to implement something
     // new there that pays more attention to the depth in the DAG? Perhaps
-    // a variant of closest_common_node?
+    // a variant of closest_common_nodes?
     'parents: for parent_copy_id in &history.parents {
         let mut absent_ancestors = vec![];
 

@@ -28,11 +28,11 @@ use crossterm::terminal::Clear;
 use crossterm::terminal::ClearType;
 use indoc::writedoc;
 use itertools::Itertools as _;
-use jj_lib::commit::Commit;
 use jj_lib::git;
 use jj_lib::git::FailedRefExportReason;
 use jj_lib::git::GitExportStats;
 use jj_lib::git::GitImportOptions;
+use jj_lib::git::GitImportRefUpdate;
 use jj_lib::git::GitImportStats;
 use jj_lib::git::GitProgress;
 use jj_lib::git::GitPushStats;
@@ -40,9 +40,7 @@ use jj_lib::git::GitRefKind;
 use jj_lib::git::GitSettings;
 use jj_lib::git::GitSidebandLineTerminator;
 use jj_lib::git::GitSubprocessCallback;
-use jj_lib::op_store::RefTarget;
-use jj_lib::op_store::RemoteRef;
-use jj_lib::ref_name::RemoteRefSymbol;
+use jj_lib::op_store::RemoteRefState;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo;
 use jj_lib::settings::RemoteSettingsMap;
@@ -61,8 +59,8 @@ use crate::revset_util::parse_remote_auto_track_bookmarks_map;
 use crate::ui::ProgressOutput;
 use crate::ui::Ui;
 
-pub fn is_colocated_git_workspace(workspace: &Workspace, repo: &ReadonlyRepo) -> bool {
-    let Ok(git_backend) = git::get_git_backend(repo.store()) else {
+pub fn is_colocated_git_workspace(workspace: &Workspace) -> bool {
+    let Ok(git_backend) = git::get_git_backend(workspace.repo_loader().store()) else {
         return false;
     };
     let Some(git_workdir) = git_backend.git_workdir() else {
@@ -85,7 +83,7 @@ pub fn absolute_git_url(cwd: &Path, source: &str) -> Result<String, CommandError
     // exits, and fails because '$PWD/https' is unsupported protocol. Since it would
     // be tedious to copy the exact git (or libgit2) behavior, we simply let gix
     // parse the input as URL, rcp-like, or local path.
-    let mut url = gix::url::parse(source.as_ref()).map_err(cli_error)?;
+    let mut url = gix::url::parse(source).map_err(cli_error)?;
     url.canonicalize(cwd).map_err(user_error)?;
     // As of gix 0.68.0, the canonicalized path uses platform-native directory
     // separator, which isn't compatible with libgit2 on Windows.
@@ -210,8 +208,8 @@ pub fn load_git_import_options(
     remote_settings: &RemoteSettingsMap,
 ) -> Result<GitImportOptions, CommandError> {
     Ok(GitImportOptions {
-        auto_local_bookmark: git_settings.auto_local_bookmark,
         abandon_unreachable_commits: git_settings.abandon_unreachable_commits,
+        record_synthetic_predecessors: git_settings.record_synthetic_predecessors,
         remote_auto_track_bookmarks: parse_remote_auto_track_bookmarks_map(ui, remote_settings)?,
     })
 }
@@ -239,9 +237,7 @@ fn print_imported_changes(
     ] {
         let refs_stats = changes
             .iter()
-            .map(|(symbol, (remote_ref, ref_target))| {
-                RefStatus::new(kind, symbol.as_ref(), remote_ref, ref_target, tx.repo())
-            })
+            .map(|update| RefStatus::new(kind, update, tx.repo()))
             .collect_vec();
         let Some(max_width) = refs_stats.iter().map(|x| x.symbol.width()).max() else {
             continue;
@@ -257,13 +253,15 @@ fn print_imported_changes(
             "Abandoned {} commits that are no longer reachable:",
             stats.abandoned_commits.len()
         )?;
-        let abandoned_commits: Vec<Commit> = stats
-            .abandoned_commits
-            .iter()
-            .map(|id| tx.repo().store().get_commit(id))
-            .try_collect()?;
         let template = tx.commit_summary_template();
-        print_updated_commits(formatter, &template, &abandoned_commits)?;
+        print_updated_commits(formatter, &template, &stats.abandoned_commits)?;
+    }
+    if !stats.rewritten_commit_ids.is_empty() {
+        writeln!(
+            formatter,
+            "Updated {} rewritten commits.",
+            stats.rewritten_commit_ids.len()
+        )?;
     }
 
     Ok(())
@@ -299,14 +297,21 @@ fn print_failed_git_import(ui: &Ui, stats: &GitImportStats) -> Result<(), Comman
 /// Prints only the summary of git import stats (abandoned count, failed refs).
 /// Use this when a WorkspaceCommandTransaction is not available.
 pub fn print_git_import_stats_summary(ui: &Ui, stats: &GitImportStats) -> Result<(), CommandError> {
-    if !stats.abandoned_commits.is_empty()
-        && let Some(mut formatter) = ui.status_formatter()
-    {
-        writeln!(
-            formatter,
-            "Abandoned {} commits that are no longer reachable.",
-            stats.abandoned_commits.len()
-        )?;
+    if let Some(mut formatter) = ui.status_formatter() {
+        if !stats.abandoned_commits.is_empty() {
+            writeln!(
+                formatter,
+                "Abandoned {} commits that are no longer reachable.",
+                stats.abandoned_commits.len()
+            )?;
+        }
+        if !stats.rewritten_commit_ids.is_empty() {
+            writeln!(
+                formatter,
+                "Updated {} rewritten commits.",
+                stats.rewritten_commit_ids.len()
+            )?;
+        }
     }
     print_failed_git_import(ui, stats)?;
     Ok(())
@@ -399,48 +404,38 @@ fn draw_progress(progress: f32, buffer: &mut String, width: usize) {
 struct RefStatus {
     ref_kind: GitRefKind,
     symbol: String,
-    tracking_status: TrackingStatus,
+    remote_ref_state: RemoteRefState,
     import_status: ImportStatus,
 }
 
 impl RefStatus {
-    fn new(
-        ref_kind: GitRefKind,
-        symbol: RemoteRefSymbol<'_>,
-        remote_ref: &RemoteRef,
-        ref_target: &RefTarget,
-        repo: &dyn Repo,
-    ) -> Self {
-        let tracking_status = match ref_kind {
-            GitRefKind::Bookmark => {
-                if repo.view().get_remote_bookmark(symbol).is_tracked() {
-                    TrackingStatus::Tracked
-                } else {
-                    TrackingStatus::Untracked
-                }
-            }
-            GitRefKind::Tag => TrackingStatus::NotApplicable,
+    fn new(ref_kind: GitRefKind, update: &GitImportRefUpdate, repo: &dyn Repo) -> Self {
+        let new_remote_ref = match ref_kind {
+            GitRefKind::Bookmark => repo.view().get_remote_bookmark(update.symbol.as_ref()),
+            GitRefKind::Tag => repo.view().get_remote_tag(update.symbol.as_ref()),
         };
 
-        let import_status = match (remote_ref.target.is_absent(), ref_target.is_absent()) {
+        let import_status = match (
+            update.old_remote_ref.target.is_absent(),
+            update.new_target.is_absent(),
+        ) {
             (true, false) => ImportStatus::New,
             (false, true) => ImportStatus::Deleted,
             _ => ImportStatus::Updated,
         };
 
         Self {
-            symbol: symbol.to_string(),
-            tracking_status,
+            symbol: update.symbol.to_string(),
+            remote_ref_state: new_remote_ref.state,
             import_status,
             ref_kind,
         }
     }
 
     fn output(&self, max_symbol_width: usize, out: &mut dyn Formatter) -> std::io::Result<()> {
-        let tracking_status = match self.tracking_status {
-            TrackingStatus::Tracked => "tracked",
-            TrackingStatus::Untracked => "untracked",
-            TrackingStatus::NotApplicable => "",
+        let tracking_status = match self.remote_ref_state {
+            RemoteRefState::New => "untracked",
+            RemoteRefState::Tracked => "tracked",
         };
 
         let import_status = match self.import_status {
@@ -462,12 +457,6 @@ impl RefStatus {
         write!(out.labeled(label), "{padded_symbol}")?;
         writeln!(out, " [{import_status}] {tracking_status}")
     }
-}
-
-enum TrackingStatus {
-    Tracked,
-    Untracked,
-    NotApplicable, // for tags
 }
 
 enum ImportStatus {

@@ -25,6 +25,7 @@ use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
 
+use futures::AsyncReadExt as _;
 use itertools::Itertools as _;
 use jj_lib::backend;
 use jj_lib::backend::Backend;
@@ -44,6 +45,7 @@ use jj_lib::config::ConfigLayer;
 use jj_lib::config::ConfigSource;
 use jj_lib::config::StackedConfig;
 use jj_lib::conflict_labels::ConflictLabels;
+use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::git_backend::GitBackend;
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::EverythingMatcher;
@@ -59,6 +61,7 @@ use jj_lib::repo::StoreFactories;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::repo_path::RepoPathComponent;
+use jj_lib::revset::RevsetExpression;
 use jj_lib::rewrite::RebaseOptions;
 use jj_lib::rewrite::RebasedCommit;
 use jj_lib::secret_backend::SecretBackend;
@@ -75,7 +78,6 @@ use jj_lib::working_copy::SnapshotStats;
 use jj_lib::workspace::Workspace;
 use pollster::FutureExt as _;
 use tempfile::TempDir;
-use tokio::io::AsyncReadExt as _;
 
 use crate::test_backend::TestBackendFactory;
 
@@ -197,8 +199,8 @@ impl TestEnvironment {
         self.temp_dir.path()
     }
 
-    pub fn default_store_factories(&self) -> StoreFactories {
-        let mut factories = StoreFactories::default();
+    pub fn default_backend_factories(&self) -> StoreFactories {
+        let mut factories = default_backend_factories();
         factories.add_backend("test", {
             let factory = self.test_backend_factory.clone();
             Box::new(move |_settings, store_path| Ok(Box::new(factory.load(store_path))))
@@ -217,7 +219,7 @@ impl TestEnvironment {
         settings: &UserSettings,
         repo_path: &Path,
     ) -> Arc<ReadonlyRepo> {
-        RepoLoader::init_from_file_system(settings, repo_path, &self.default_store_factories())
+        RepoLoader::init_from_file_system(settings, repo_path, &self.default_backend_factories())
             .unwrap()
             .load_at_head()
             .block_on()
@@ -246,7 +248,11 @@ impl TestRepoBackend {
         store_path: &Path,
     ) -> Result<Box<dyn Backend>, BackendInitError> {
         match self {
-            Self::Git => Ok(Box::new(GitBackend::init_internal(settings, store_path)?)),
+            Self::Git => Ok(Box::new(GitBackend::init_internal(
+                settings,
+                store_path,
+                gix::hash::Kind::default(),
+            )?)),
             Self::Simple => Ok(Box::new(SimpleBackend::init(store_path))),
             Self::Test => Ok(Box::new(env.test_backend_factory.init(store_path))),
         }
@@ -368,7 +374,11 @@ impl TestWorkspace {
         &mut self,
         options: &SnapshotOptions,
     ) -> Result<(MergedTree, SnapshotStats), SnapshotError> {
-        let mut locked_ws = self.workspace.start_working_copy_mutation().unwrap();
+        let mut locked_ws = self
+            .workspace
+            .start_working_copy_mutation()
+            .block_on()
+            .unwrap();
         let (tree, stats) = locked_ws.locked_wc().snapshot(options).block_on()?;
         // arbitrary operation id
         locked_ws
@@ -754,6 +764,22 @@ pub fn write_random_commit_with_parents(mut_repo: &mut MutableRepo, parents: &[&
         .write_unwrap()
 }
 
+pub fn write_random_commit_with_parents_and_description(
+    mut_repo: &mut MutableRepo,
+    parents: &[&Commit],
+    description: &str,
+) -> Commit {
+    let parents = if parents.is_empty() {
+        &[&mut_repo.store().root_commit()]
+    } else {
+        parents
+    };
+    create_random_commit(mut_repo)
+        .set_description(description)
+        .set_parents(parents.iter().map(|commit| commit.id().clone()).collect())
+        .write_unwrap()
+}
+
 pub fn write_working_copy_file(workspace_root: &Path, path: &RepoPath, contents: impl AsRef<[u8]>) {
     let path = path.to_fs_path(workspace_root).unwrap();
     if let Some(parent) = path.parent() {
@@ -774,8 +800,9 @@ pub fn rebase_descendants_with_options_return_map(
     repo: &mut MutableRepo,
     options: &RebaseOptions,
 ) -> HashMap<CommitId, CommitId> {
+    let immutable = RevsetExpression::none();
     let mut rebased: HashMap<CommitId, CommitId> = HashMap::new();
-    repo.rebase_descendants_with_options(options, |old_commit, rebased_commit| {
+    repo.rebase_descendants_with_options(&immutable, options, |old_commit, rebased_commit| {
         let old_commit_id = old_commit.id().clone();
         let new_commit_id = match rebased_commit {
             RebasedCommit::Rewritten(new_commit) => new_commit.id().clone(),

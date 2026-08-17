@@ -17,8 +17,10 @@ use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::HashSet;
+use std::collections::hash_map::HashMap;
 use std::convert::Infallible;
 use std::fmt;
+use std::future::ready;
 use std::iter;
 use std::ops::Range;
 use std::rc::Rc;
@@ -151,7 +153,7 @@ impl<I> fmt::Debug for RevsetImpl<I> {
 }
 
 impl<I: AsCompositeIndex + Clone> Revset for RevsetImpl<I> {
-    fn iter<'a>(&self) -> Box<dyn Iterator<Item = Result<CommitId, RevsetEvaluationError>> + 'a>
+    fn stream<'a>(&self) -> LocalBoxStream<'a, Result<CommitId, RevsetEvaluationError>>
     where
         Self: 'a,
     {
@@ -160,19 +162,12 @@ impl<I: AsCompositeIndex + Clone> Revset for RevsetImpl<I> {
             .inner
             .positions()
             .map(|index, pos| Ok(index.commits().entry_by_pos(pos?).commit_id()));
-        Box::new(iter::from_fn(move || walk.next(index.as_composite())))
-    }
-
-    fn stream<'a>(&self) -> LocalBoxStream<'a, Result<CommitId, RevsetEvaluationError>>
-    where
-        Self: 'a,
-    {
-        futures::stream::iter(self.iter()).boxed_local()
+        futures::stream::iter(iter::from_fn(move || walk.next(index.as_composite()))).boxed_local()
     }
 
     fn commit_change_ids<'a>(
         &self,
-    ) -> Box<dyn Iterator<Item = Result<(CommitId, ChangeId), RevsetEvaluationError>> + 'a>
+    ) -> LocalBoxStream<'a, Result<(CommitId, ChangeId), RevsetEvaluationError>>
     where
         Self: 'a,
     {
@@ -181,17 +176,7 @@ impl<I: AsCompositeIndex + Clone> Revset for RevsetImpl<I> {
             let entry = index.commits().entry_by_pos(pos?);
             Ok((entry.commit_id(), entry.change_id()))
         });
-        Box::new(iter::from_fn(move || walk.next(index.as_composite())))
-    }
-
-    fn iter_graph<'a>(
-        &self,
-    ) -> Box<dyn Iterator<Item = Result<GraphNode<CommitId>, RevsetEvaluationError>> + 'a>
-    where
-        Self: 'a,
-    {
-        let skip_transitive_edges = true;
-        Box::new(self.iter_graph_impl(skip_transitive_edges))
+        futures::stream::iter(iter::from_fn(move || walk.next(index.as_composite()))).boxed_local()
     }
 
     fn stream_graph<'a>(
@@ -200,11 +185,12 @@ impl<I: AsCompositeIndex + Clone> Revset for RevsetImpl<I> {
     where
         Self: 'a,
     {
-        futures::stream::iter(self.iter_graph()).boxed_local()
+        let skip_transitive_edges = true;
+        futures::stream::iter(self.iter_graph_impl(skip_transitive_edges)).boxed_local()
     }
 
-    fn is_empty(&self) -> bool {
-        self.positions().next().is_none()
+    fn is_empty(&self) -> Result<bool, RevsetEvaluationError> {
+        Ok(self.positions().next().transpose()?.is_none())
     }
 
     fn count_estimate(&self) -> Result<(usize, Option<usize>), RevsetEvaluationError> {
@@ -232,7 +218,10 @@ impl<I: AsCompositeIndex + Clone> Revset for RevsetImpl<I> {
         Self: 'a,
     {
         let positions = PositionsAccumulator::new(self.index.clone(), self.inner.positions());
-        Box::new(move |commit_id| positions.contains(commit_id))
+        Box::new(move |commit_id| {
+            let result = positions.contains(commit_id);
+            Box::pin(ready(result))
+        })
     }
 }
 
@@ -986,6 +975,26 @@ impl EvaluationContext<'_> {
                 });
                 Ok(Box::new(EagerRevset { positions }))
             }
+            ResolvedExpression::Forks { heads } => {
+                let head_positions = self
+                    .evaluate(heads)?
+                    .positions()
+                    .attach(index)
+                    .try_collect()?;
+                let mut child_counts: HashMap<GlobalCommitPosition, u32> = HashMap::new();
+                let walk = RevWalkBuilder::new(index)
+                    .wanted_heads(head_positions)
+                    .ancestors()
+                    .detach()
+                    .filter_map(move |index: &CompositeIndex, pos| {
+                        let is_fork = child_counts.remove(&pos).unwrap_or(0) >= 2;
+                        for parent in index.commits().entry_by_pos(pos).parent_positions() {
+                            *child_counts.entry(parent).or_insert(0) += 1;
+                        }
+                        is_fork.then_some(pos)
+                    });
+                Ok(Box::new(RevWalkRevset { walk }))
+            }
             ResolvedExpression::ForkPoint(expression) => {
                 let expression_set = self.evaluate(expression)?;
                 let mut expression_positions_iter = expression_set.positions().attach(index);
@@ -999,6 +1008,47 @@ impl EvaluationContext<'_> {
                         .common_ancestors_pos(positions, vec![position?]);
                 }
                 Ok(Box::new(EagerRevset { positions }))
+            }
+            ResolvedExpression::MergePoint {
+                roots,
+                visible_heads,
+            } => {
+                let mut root_position_iter = self.evaluate(roots)?.positions().attach(index);
+                let Some(position) = root_position_iter.next() else {
+                    return Ok(Box::new(EagerRevset::empty()));
+                };
+                let visible_head_positions = self
+                    .evaluate(visible_heads)?
+                    .positions()
+                    .attach(index)
+                    .try_collect()?;
+                let mut candidates = RevWalkBuilder::new(index)
+                    .wanted_heads(visible_head_positions)
+                    .descendants(maplit::hashset![position?])
+                    .collect_vec();
+                candidates.reverse();
+                for position in root_position_iter {
+                    let descendants = RevWalkBuilder::new(index)
+                        .wanted_heads(candidates.clone())
+                        .descendants(maplit::hashset![position?])
+                        .collect_positions_set();
+                    candidates.retain(|pos| descendants.contains(pos));
+                    if candidates.is_empty() {
+                        return Ok(Box::new(EagerRevset::empty()));
+                    }
+                }
+                let candidate_set: HashSet<_> = candidates.iter().copied().collect();
+                candidates.retain(|&pos| {
+                    !index
+                        .commits()
+                        .entry_by_pos(pos)
+                        .parent_positions()
+                        .iter()
+                        .any(|parent| candidate_set.contains(parent))
+                });
+                Ok(Box::new(EagerRevset {
+                    positions: candidates,
+                }))
             }
             ResolvedExpression::Bisect(candidates) => {
                 let set = self.evaluate(candidates)?;
@@ -1023,20 +1073,20 @@ impl EvaluationContext<'_> {
                     .take(count.saturating_add(1))
                     .try_collect()?;
                 if positions.len() != *count {
-                    // https://github.com/jj-vcs/jj/pull/7252#pullrequestreview-3236259998
-                    // in the default engine we have to evaluate the entire
-                    // revset (which may be very large) to get an exact count;
-                    // we would need to remove .take() above. instead just give
-                    // a vaguely approximate error message
-                    let determiner = if positions.len() > *count {
-                        "more"
+                    let message = if positions.len() > *count {
+                        // https://github.com/jj-vcs/jj/pull/7252#pullrequestreview-3236259998
+                        // In the default engine we have to evaluate the entire
+                        // revset (which may be very large) to get an exact
+                        // count; we would need to remove .take() above. Instead
+                        // just give a vague error message.
+                        format!("The revset has more than the expected {count} revisions")
                     } else {
-                        "fewer"
+                        format!(
+                            "The revset has fewer than the expected {count} revisions (got {})",
+                            positions.len()
+                        )
                     };
-                    return Err(RevsetEvaluationError::Other(
-                        format!("The revset has {determiner} than the expected {count} revisions")
-                            .into(),
-                    ));
+                    return Err(RevsetEvaluationError::Other(message.into()));
                 }
                 Ok(Box::new(EagerRevset { positions }))
             }

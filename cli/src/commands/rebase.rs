@@ -332,7 +332,7 @@ pub struct RebaseDestinationArgs {
     /// commit)
     #[arg(
         long,
-        alias = "destination",
+        visible_alias = "destination",
         short,
         visible_short_alias = 'd',
         value_name = "REVSETS"
@@ -381,7 +381,7 @@ pub(crate) async fn cmd_rebase(
         },
         simplify_ancestor_merge: args.simplify_parents,
     };
-    let mut workspace_command = command.workspace_helper(ui)?;
+    let mut workspace_command = command.workspace_helper(ui).await?;
 
     let loc = if !args.revisions.is_empty() {
         plan_rebase_revisions(ui, &workspace_command, &args.revisions, &args.destination).await?
@@ -498,8 +498,12 @@ async fn plan_rebase_source(
     .await?;
     if rebase_destination.onto.is_some() {
         for id in &source_commit_ids {
-            let commit = workspace_command.repo().store().get_commit(id)?;
-            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, &commit)?;
+            let commit = workspace_command
+                .repo()
+                .store()
+                .get_commit_async(id)
+                .await?;
+            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, &commit).await?;
         }
     }
 
@@ -555,8 +559,12 @@ async fn plan_rebase_branch(
         .await?;
     if rebase_destination.onto.is_some() {
         for id in &root_commit_ids {
-            let commit = workspace_command.repo().store().get_commit(id)?;
-            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, &commit)?;
+            let commit = workspace_command
+                .repo()
+                .store()
+                .get_commit_async(id)
+                .await?;
+            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, &commit).await?;
         }
     }
 
@@ -567,7 +575,7 @@ async fn plan_rebase_branch(
     })
 }
 
-fn check_rebase_destinations(
+async fn check_rebase_destinations(
     repo: &Arc<ReadonlyRepo>,
     new_parents: &[CommitId],
     commit: &Commit,
@@ -579,7 +587,7 @@ fn check_rebase_destinations(
                 short_commit_hash(commit.id()),
             )));
         }
-        if repo.index().is_ancestor(commit.id(), parent_id)? {
+        if repo.index().is_ancestor(commit.id(), parent_id).await? {
             return Err(user_error(format!(
                 "Cannot rebase {} onto descendant {}",
                 short_commit_hash(commit.id()),
@@ -621,25 +629,25 @@ fn print_move_commits_stats(ui: &Ui, stats: &MoveCommitsStats) -> std::io::Resul
     if num_skipped_rebases > 0 {
         writeln!(
             formatter,
-            "Skipped rebase of {num_skipped_rebases} commits that were already in place"
+            "Skipped rebase of {num_skipped_rebases} commits that were already in place."
         )?;
     }
     if num_rebased_targets > 0 {
         writeln!(
             formatter,
-            "Rebased {num_rebased_targets} commits to destination"
+            "Rebased {num_rebased_targets} commits to destination."
         )?;
     }
     if num_rebased_descendants > 0 {
         writeln!(
             formatter,
-            "Rebased {num_rebased_descendants} descendant commits"
+            "Rebased {num_rebased_descendants} descendant commits."
         )?;
     }
     if num_abandoned_empty > 0 {
         writeln!(
             formatter,
-            "Abandoned {num_abandoned_empty} newly emptied commits"
+            "Abandoned {num_abandoned_empty} newly emptied commits."
         )?;
     }
     Ok(())

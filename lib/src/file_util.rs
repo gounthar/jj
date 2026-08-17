@@ -20,20 +20,16 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::ErrorKind;
-use std::io::Read;
 use std::io::Write;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
-use std::pin::Pin;
-use std::task::Poll;
 
+use futures::AsyncRead;
+use futures::AsyncReadExt as _;
 use tempfile::NamedTempFile;
 use tempfile::PersistError;
 use thiserror::Error;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt as _;
-use tokio::io::ReadBuf;
 
 #[cfg(unix)]
 pub use self::platform::check_executable_bit_support;
@@ -135,23 +131,40 @@ pub fn expand_home_path(path_str: &str) -> PathBuf {
 /// Turns the given `to` path into relative path starting from the `from` path.
 ///
 /// Both `from` and `to` paths are supposed to be absolute and normalized in the
-/// same manner.
+/// same manner. If `from` and `to` share no common prefix, the returned path is
+/// unchanged. This also means `relative_path(abs, rel)` will return `rel`.
 pub fn relative_path(from: &Path, to: &Path) -> PathBuf {
-    // Find common prefix.
-    for (i, base) in from.ancestors().enumerate() {
-        if let Ok(suffix) = to.strip_prefix(base) {
-            if i == 0 && suffix.as_os_str().is_empty() {
-                return ".".into();
-            } else {
-                return std::iter::repeat_n(Path::new(".."), i)
-                    .chain(std::iter::once(suffix))
-                    .collect();
-            }
-        }
+    let Some((from_suffix, to_suffix)) = strip_common_path_prefix(from, to) else {
+        // No common prefix found. Return the original path.
+        return to.to_owned();
+    };
+    let depth = from_suffix.components().count();
+    let mut relative = PathBuf::with_capacity(2 * depth + 1 + to_suffix.as_os_str().len());
+    for _ in 0..depth {
+        relative.push(Component::ParentDir);
     }
+    if !to_suffix.as_os_str().is_empty() {
+        relative.push(to_suffix);
+    } else if depth == 0 {
+        relative.push(Component::CurDir);
+    }
+    relative
+}
 
-    // No common prefix found. Return the original (absolute) path.
-    to.to_owned()
+fn strip_common_path_prefix<'a, 'b>(
+    path1: &'a Path,
+    path2: &'b Path,
+) -> Option<(&'a Path, &'b Path)> {
+    let mut components1 = path1.components();
+    let mut components2 = path2.components();
+    let mut suffix_paths = None;
+    while let (Some(c1), Some(c2)) = (components1.next(), components2.next()) {
+        if c1 != c2 {
+            break;
+        }
+        suffix_paths = Some((components1.as_path(), components2.as_path()));
+    }
+    suffix_paths
 }
 
 /// Consumes as much `..` and `.` as possible without considering symlinks.
@@ -268,8 +281,6 @@ pub struct FileIdentity(platform::FileIdentity);
 
 impl FileIdentity {
     /// Queries file identity without following symlinks.
-    ///
-    /// BUG: On Windows, symbolic links would be followed.
     pub fn from_symlink_path(path: impl AsRef<Path>) -> io::Result<Self> {
         platform::file_identity_from_symlink_path(path.as_ref()).map(Self)
     }
@@ -298,32 +309,6 @@ pub async fn copy_async_to_sync<R: AsyncRead, W: Write + ?Sized>(
         }
         writer.write_all(&buf[0..written_bytes])?;
         total_written_bytes += written_bytes;
-    }
-}
-
-/// `AsyncRead` implementation backed by a `Read`. It is not actually async;
-/// the goal is simply to avoid reading the full contents from the `Read` into
-/// memory.
-pub struct BlockingAsyncReader<R> {
-    reader: R,
-}
-
-impl<R: Read + Unpin> BlockingAsyncReader<R> {
-    /// Creates a new `BlockingAsyncReader`
-    pub fn new(reader: R) -> Self {
-        Self { reader }
-    }
-}
-
-impl<R: Read + Unpin> AsyncRead for BlockingAsyncReader<R> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let num_bytes_read = self.reader.read(buf.initialize_unfilled())?;
-        buf.advance(num_bytes_read);
-        Poll::Ready(Ok(()))
     }
 }
 
@@ -417,7 +402,9 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use std::fs::File;
+    use std::fs::OpenOptions;
     use std::io;
+    use std::os::windows::fs::OpenOptionsExt as _;
     pub use std::os::windows::fs::symlink_dir;
     pub use std::os::windows::fs::symlink_file;
     use std::path::Path;
@@ -444,14 +431,22 @@ mod platform {
 
     pub type FileIdentity = same_file::Handle;
 
-    // FIXME: This shouldn't follow symlinks when querying file identity.
-    // Perhaps, we need to open file with FILE_FLAG_BACKUP_SEMANTICS and
-    // FILE_FLAG_OPEN_REPARSE_POINT, then pass it to from_file(). Alternatively,
-    // maybe we can use symlink_metadata(), volume_serial_number(), and
-    // file_index() when they get stabilized. See the same-file crate and std
-    // lstat() implementation. https://github.com/rust-lang/rust/issues/63010
     pub fn file_identity_from_symlink_path(path: &Path) -> io::Result<FileIdentity> {
-        same_file::Handle::from_path(path)
+        // `same_file::Handle::from_path()` follows symlinks, because it opens
+        // the path without `FILE_FLAG_OPEN_REPARSE_POINT`. Open the file the
+        // same way it does (read access, plus `FILE_FLAG_BACKUP_SEMANTICS` so a
+        // directory can be opened too), but add `FILE_FLAG_OPEN_REPARSE_POINT`
+        // so the handle refers to the symlink itself instead of its target.
+        // This matches the Unix implementation, which uses `symlink_metadata()`.
+        // The reparse-point flag is ignored for paths that aren't reparse
+        // points, so regular files and hard links are unaffected.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        same_file::Handle::from_file(file)
     }
 
     pub fn file_identity_from_file(file: File) -> io::Result<FileIdentity> {
@@ -481,9 +476,7 @@ mod fallback {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-    use std::io::Write as _;
-
+    use futures::io::Cursor;
     use itertools::Itertools as _;
     use pollster::FutureExt as _;
     use test_case::test_case;
@@ -522,6 +515,80 @@ mod tests {
             assert!(path_from_bytes(bytes).is_err());
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_relative_path() {
+        // Compare as strings, not as (normalized) paths
+        let p = |slash_path: &str| {
+            let mut native_path = slash_path.replace('/', std::path::MAIN_SEPARATOR_STR);
+            if cfg!(windows) && slash_path.starts_with('/') {
+                native_path.insert_str(0, "c:"); // make the path truly absolute
+            }
+            native_path
+        };
+        let relative = |from: &str, to: &str| {
+            relative_path(p(from).as_ref(), p(to).as_ref())
+                .into_os_string()
+                .into_string()
+                .unwrap()
+        };
+
+        assert_eq!(relative("/foo/bar", "/foo/bar"), p("."));
+        assert_eq!(relative("/foo", "/foo/bar"), p("bar"));
+        assert_eq!(relative("/", "/foo/bar"), p("foo/bar"));
+
+        assert_eq!(relative("/foo/bar/baz", "/foo/bar"), p(".."));
+        assert_eq!(relative("/foo/baz", "/foo/bar"), p("../bar"));
+        assert_eq!(relative("/baz", "/foo/bar"), p("../foo/bar"));
+
+        assert_eq!(relative("/foo/bar/baz/qux", "/foo/bar"), p("../.."));
+        assert_eq!(relative("/foo/baz/qux", "/foo/bar"), p("../../bar"));
+        assert_eq!(relative("/baz/qux", "/foo/bar"), p("../../foo/bar"));
+
+        // No common prefix components
+        assert_eq!(relative("foo/bar", "/foo/bar"), p("/foo/bar"));
+        assert_eq!(relative("/foo/bar", "foo/bar"), p("foo/bar"));
+        assert_eq!(relative("./foo/bar", "/./foo/bar"), p("/./foo/bar"));
+        assert_eq!(relative("/./foo/bar", "./foo/bar"), p("./foo/bar"));
+        assert_eq!(relative("/foo", ""), p("")); // or "."
+        assert_eq!(relative("", "/foo"), p("/foo"));
+        assert_eq!(relative("", ""), p("")); // or "."
+
+        // Redundant components are skipped by Path::components()
+        assert_eq!(relative("/./foo/./bar", "/foo/bar"), p("."));
+        assert_eq!(relative("/foo/bar", "/./foo/./bar"), p("."));
+        assert_eq!(relative("/./foo/./bar", "/foo"), p(".."));
+        assert_eq!(relative("/foo", "/./foo/./bar"), p("bar"));
+    }
+
+    #[test]
+    fn test_relative_path_windows() {
+        // Compare as strings, not as (normalized) paths
+        let relative = |from: &str, to: &str| {
+            relative_path(from.as_ref(), to.as_ref())
+                .into_os_string()
+                .into_string()
+                .unwrap()
+        };
+
+        if cfg!(windows) {
+            assert_eq!(relative(r"c:\foo\bar", r"c:\foo\bar"), ".");
+            assert_eq!(relative(r"c:\foo", r"c:\foo\bar"), "bar");
+            assert_eq!(relative(r"c:\", r"c:\foo\bar"), r"foo\bar");
+
+            assert_eq!(relative(r"d:\foo", r"c:\foo\bar"), r"c:\foo\bar");
+            assert_eq!(relative(r"d:\", r"c:\foo\bar"), r"c:\foo\bar");
+
+            assert_eq!(relative(r"\\foo\bar", r"\foo\bar"), r"\foo\bar");
+            assert_eq!(relative(r"\\foo\bar", r"\\foo\bar"), ".");
+            assert_eq!(relative(r"\\foo\bar\baz", r"\\foo\bar\baz"), ".");
+            assert_eq!(relative(r"\\foo\bar\baz", r"\\foo\bar\qux"), r"..\qux");
+            assert_eq!(
+                relative(r"\\foo\bar\baz", r"\\qux\bar\baz"),
+                r"\\qux\bar\baz"
+            );
+        }
     }
 
     #[test]
@@ -644,6 +711,85 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_file_identity_windows_symlink_file() -> TestResult {
+        if !check_symlink_support()? {
+            return Ok(());
+        }
+        let temp_dir = new_temp_dir();
+        let file_path = temp_dir.path().join("file");
+        let symlink_path = temp_dir.path().join("symlink");
+        fs::write(&file_path, "")?;
+        symlink_file("file", &symlink_path)?;
+        // symlink should be identical to itself
+        assert_eq!(
+            FileIdentity::from_symlink_path(&symlink_path)?,
+            FileIdentity::from_symlink_path(&symlink_path)?
+        );
+        // symlink should be different from the target file
+        assert_ne!(
+            FileIdentity::from_symlink_path(&file_path)?,
+            FileIdentity::from_symlink_path(&symlink_path)?
+        );
+        // File::open() follows symlinks
+        assert_eq!(
+            FileIdentity::from_symlink_path(&file_path)?,
+            FileIdentity::from_file(File::open(&symlink_path)?)?
+        );
+        assert_ne!(
+            FileIdentity::from_symlink_path(&symlink_path)?,
+            FileIdentity::from_file(File::open(&symlink_path)?)?
+        );
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_file_identity_windows_symlink_dir() -> TestResult {
+        if !check_symlink_support()? {
+            return Ok(());
+        }
+        let temp_dir = new_temp_dir();
+        let dir_path = temp_dir.path().join("dir");
+        let symlink_path = temp_dir.path().join("symlink");
+        fs::create_dir(&dir_path)?;
+        symlink_dir("dir", &symlink_path)?;
+        // symlink should be identical to itself
+        assert_eq!(
+            FileIdentity::from_symlink_path(&symlink_path)?,
+            FileIdentity::from_symlink_path(&symlink_path)?
+        );
+        // symlink should be different from the target directory. The
+        // `File::open()` follow-through is not checked here because File::open()
+        // can't open a directory on Windows.
+        assert_ne!(
+            FileIdentity::from_symlink_path(&dir_path)?,
+            FileIdentity::from_symlink_path(&symlink_path)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_file_identity_directory() -> TestResult {
+        let temp_dir = new_temp_dir();
+        let dir_path = temp_dir.path().join("dir");
+        let other_dir_path = temp_dir.path().join("other_dir");
+        fs::create_dir(&dir_path)?;
+        fs::create_dir(&other_dir_path)?;
+        // a directory should be identical to itself
+        assert_eq!(
+            FileIdentity::from_symlink_path(&dir_path)?,
+            FileIdentity::from_symlink_path(&dir_path)?
+        );
+        // distinct directories should differ
+        assert_ne!(
+            FileIdentity::from_symlink_path(&dir_path)?,
+            FileIdentity::from_symlink_path(&other_dir_path)?
+        );
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_file_identity_unix_symlink_loop() -> TestResult {
@@ -697,36 +843,6 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result?, 40000);
         assert_eq!(output, input);
-        Ok(())
-    }
-
-    #[test]
-    fn test_blocking_async_reader() -> TestResult {
-        let input = b"hello";
-        let sync_reader = Cursor::new(&input);
-        let mut async_reader = BlockingAsyncReader::new(sync_reader);
-
-        let mut buf = [0u8; 3];
-        let num_bytes_read = async_reader.read(&mut buf).block_on()?;
-        assert_eq!(num_bytes_read, 3);
-        assert_eq!(&buf, &input[0..3]);
-
-        let num_bytes_read = async_reader.read(&mut buf).block_on()?;
-        assert_eq!(num_bytes_read, 2);
-        assert_eq!(&buf[0..2], &input[3..5]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_blocking_async_reader_read_to_end() -> TestResult {
-        let input = b"hello";
-        let sync_reader = Cursor::new(&input);
-        let mut async_reader = BlockingAsyncReader::new(sync_reader);
-
-        let mut buf = vec![];
-        let num_bytes_read = async_reader.read_to_end(&mut buf).block_on()?;
-        assert_eq!(num_bytes_read, input.len());
-        assert_eq!(&buf, &input);
         Ok(())
     }
 }

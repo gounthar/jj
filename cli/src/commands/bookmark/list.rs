@@ -101,6 +101,9 @@ pub struct BookmarkListArgs {
     /// keywords in the template expression. See [`jj help -k templates`]
     /// for more information.
     ///
+    /// The default template can be set by the `templates.bookmark_list`
+    /// setting.
+    ///
     /// [`CommitRef` type]:
     ///     https://docs.jj-vcs.dev/latest/templates/#commitref-type
     ///
@@ -126,7 +129,7 @@ pub async fn cmd_bookmark_list(
     command: &CommandHelper,
     args: &BookmarkListArgs,
 ) -> Result<(), CommandError> {
-    let workspace_command = command.workspace_helper(ui)?;
+    let workspace_command = command.workspace_helper(ui).await?;
     let repo = workspace_command.repo();
     let view = repo.view();
 

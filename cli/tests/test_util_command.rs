@@ -15,9 +15,24 @@
 use std::fs;
 
 use insta::assert_snapshot;
+use test_case::test_case;
+use testutils::TestRepoBackend;
 use testutils::TestResult;
+use testutils::TestWorkspace;
 
 use crate::common::TestEnvironment;
+
+#[test_case(TestRepoBackend::Simple, "Simple" ; "simple backend")]
+#[test_case(TestRepoBackend::Git, "git" ; "git backend")]
+fn test_util_backend_name(backend: TestRepoBackend, expected_name: &str) {
+    let test_env = TestEnvironment::default();
+    let test_workspace = TestWorkspace::init_with_backend(backend);
+    let root = test_workspace.workspace.workspace_root();
+    let output = test_env
+        .run_jj_in(&root, ["util", "backend", "name"])
+        .success();
+    assert_eq!(output.stdout.raw(), &[expected_name, "\n"].concat());
+}
 
 #[test]
 fn test_util_config_schema() {
@@ -99,8 +114,8 @@ fn test_gc_operation_log() {
     ------- stderr -------
     Internal error: Failed to load an operation
     Caused by:
-    1: Object 8eda7af9cb0a21f1e2663b153d168ae65ee8508fdcff832e6ea53bd7285f5304bc6d05d3ce4096d5d0ac4c16159c02a864defafd1f2908af190e02f27d6d28ed of type operation not found
-    2: Cannot access $TEST_ENV/repo/.jj/repo/op_store/operations/8eda7af9cb0a21f1e2663b153d168ae65ee8508fdcff832e6ea53bd7285f5304bc6d05d3ce4096d5d0ac4c16159c02a864defafd1f2908af190e02f27d6d28ed
+    1: Object 2bf28acab8bf15817f17f696d4483584440e13d155280691c7dd5abfa2e7e9b67258f06022cfdd5b86295cbfcfd42e9132740b8d3a75d18c2b0718b45f69d8d9 of type operation not found
+    2: Cannot access $TEST_ENV/repo/.jj/repo/op_store/operations/2bf28acab8bf15817f17f696d4483584440e13d155280691c7dd5abfa2e7e9b67258f06022cfdd5b86295cbfcfd42e9132740b8d3a75d18c2b0718b45f69d8d9
     [EOF]
     [exit status: 255]
     ");

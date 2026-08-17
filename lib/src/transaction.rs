@@ -16,11 +16,10 @@
 
 use std::sync::Arc;
 
-use pollster::FutureExt as _;
 use thiserror::Error;
 
 use crate::backend::Timestamp;
-use crate::dag_walk;
+use crate::index::IndexError;
 use crate::index::IndexStoreError;
 use crate::index::ReadonlyIndex;
 use crate::op_heads_store::OpHeadsStore;
@@ -43,6 +42,7 @@ use crate::view::View;
 #[derive(Debug, Error)]
 #[error("Failed to commit new operation")]
 pub enum TransactionCommitError {
+    Index(#[from] IndexError),
     IndexStore(#[from] IndexStoreError),
     OpHeadsStore(#[from] OpHeadsStoreError),
     OpStore(#[from] OpStoreError),
@@ -83,8 +83,12 @@ impl Transaction {
         self.mut_repo.base_repo()
     }
 
-    pub fn set_tag(&mut self, key: String, value: String) {
-        self.op_metadata.tags.insert(key, value);
+    pub fn parent_ops(&self) -> &[Operation] {
+        &self.parent_ops
+    }
+
+    pub fn set_attribute(&mut self, key: String, value: String) {
+        self.op_metadata.attributes.insert(key, value);
     }
 
     pub fn repo(&self) -> &MutableRepo {
@@ -95,20 +99,17 @@ impl Transaction {
         &mut self.mut_repo
     }
 
-    pub async fn merge_operation(&mut self, other_op: Operation) -> Result<(), RepoLoaderError> {
-        let ancestor_op = dag_walk::closest_common_node_ok(
-            self.parent_ops.iter().cloned().map(Ok),
-            [Ok(other_op.clone())],
-            |op: &Operation| op.id().clone(),
-            |op: &Operation| op.parents().block_on(),
-        )?
-        .unwrap();
+    /// Merges other_op into this transaction, using base_op as the merge base.
+    pub async fn merge_operation(
+        &mut self,
+        base_op: &Operation,
+        other_op: &Operation,
+    ) -> Result<(), RepoLoaderError> {
         let repo_loader = self.base_repo().loader();
-        let base_repo = repo_loader.load_at(&ancestor_op).await?;
-        let other_repo = repo_loader.load_at(&other_op).await?;
-        self.parent_ops.push(other_op);
-        let merged_repo = self.repo_mut();
-        merged_repo.merge(&base_repo, &other_repo).await?;
+        let base_op_repo = repo_loader.load_at(base_op).await?;
+        let other_repo = repo_loader.load_at(other_op).await?;
+        self.parent_ops.push(other_op.clone());
+        self.repo_mut().merge(&base_op_repo, &other_repo).await?;
         Ok(())
     }
 
@@ -142,7 +143,11 @@ impl Transaction {
             "BUG: Descendants have not been rebased after the last rewrites."
         );
         let base_repo = mut_repo.base_repo().clone();
-        let (mut_index, view, predecessors) = mut_repo.consume();
+        let (mut_index, view, predecessors) = mut_repo.consume().await?;
+        assert!(
+            view.is_heads_normalized(),
+            "BUG: View heads must be normalized before persisting in the database"
+        );
 
         let operation = {
             let view_id = base_repo.op_store().write_view(view.store_view()).await?;
@@ -188,7 +193,7 @@ pub fn create_op_metadata(
         username,
         is_snapshot,
         workspace_name: None,
-        tags: Default::default(),
+        attributes: Default::default(),
     }
 }
 

@@ -27,7 +27,7 @@ search space. They are included in `all()`, `x..`, `~x`, etc., but not in
 
 The `@` expression refers to the working copy commit in the current workspace.
 Use `<workspace name>@` to refer to the working-copy commit in another
-workspace. Use `<name>@<remote>` to refer to a remote-tracking tag/bookmark.
+workspace. Use `<name>@<remote>` to refer to a remote-tracking tag / bookmark.
 
 A full commit ID refers to a single commit. A unique prefix of the full commit
 ID can also be used. It is an error to use a non-unique prefix.
@@ -53,8 +53,7 @@ Jujutsu attempts to resolve a symbol in the following order:
 
 1. Tag name
 2. Bookmark name
-3. Git ref
-4. Commit ID or change ID
+3. Commit ID or change ID
 
 To override the priority, use the appropriate [revset function](#functions). For
 example, to resolve `abc` as a commit ID even if there happens to be a bookmark
@@ -95,7 +94,7 @@ y) | z` or `x & (y | z)`.
       to `x:: & ::y`. This is what `git log` calls `--ancestry-path x..y`.
    * `x..y`: Ancestors of `y` that are not also ancestors of `x`. Equivalent to
      `::y ~ ::x`. This is what `git log` calls `x..y` (i.e. the same as we call it).
-     Note that this is *not* a "path" between `x` and `y` in the commit graph—`x`
+     Note that this is *not* a "path" between `x` and `y` in the commit graph -- `x`
      and `y` do not need to be related by ancestry.
    * `::`: All visible commits in the repo. Equivalent to `all()`, and
      `root()::visible_heads()` if no hidden revisions are mentioned.
@@ -115,7 +114,7 @@ side. For example, `(A | B)..` is **not** equivalent to `A.. | B..`. The
 expression `(A | B)..` means "commits that are not ancestors of A *and* not
 ancestors of B", while `A.. | B..` means "commits that are not ancestors of A
 *or* not ancestors of B". In fact, `(A | B).. = A.. & B..`. See the examples
-*below for concrete illustrations.
+below for concrete illustrations.
 
 <!-- The following format will be understood by the web site generator, and will
  generate a folded section that can be unfolded at will. -->
@@ -268,11 +267,9 @@ revsets (expressions) as arguments.
   commit is conventionally the branch into which changes are being merged, so
   `first_ancestors()` can be used to exclude changes made on other branches.
 
-* `reachable(srcs, domain)`: All commits reachable from `srcs` within
-  `domain`, traversing all parent and child edges. `srcs` outside `domain` are
-  not considered even if a parent or child edge would reach into `domain`.
-
-  This is useful for finding all related commits in a branch or feature without
+* `reachable(srcs, domain)`: All commits reachable from `srcs`, traversing all
+  parent and child edges, such that the entire path is within `domain`. This is
+  useful for finding all related commits in a branch or feature without
   traversing outside a defined scope. For example, `reachable(@, mutable())`
   returns the stack of commits you are working on.
 
@@ -352,6 +349,13 @@ revsets (expressions) as arguments.
   the revset `heads(::x_1 & ::x_2 & ... & ::x_N)`, where `x_{1..N}` are commits
   in `x`. If `x` resolves to a single commit, `fork_point(x)` resolves to `x`.
 
+* `merge_point(x)`: The merge point of all commits in `x`. Similar to the fork
+  point, the merge point is the common descendant(s) of all commits in `x` which
+  do not have any ancestors that are also common descendants of all commits in
+  `x`. It is equivalent to the revset `roots(x_1:: & x_2:: & ... & x_N::)`,
+  where `x_{1..N}` are commits in `x`. If `x` resolves to a single commit,
+  `merge_point(x)` resolves to `x`.
+
 * `bisect(x)`: Finds commits in the input set for which about half of the input
   set are descendants. The current implementation deals somewhat poorly with
   non-linear history.
@@ -361,6 +365,8 @@ revsets (expressions) as arguments.
   when you want to ensure that some revset expression has exactly one target.
 
 * `merges()`: Merge commits.
+
+* `forks()`: Fork commits, i.e. those with more than 1 child.
 
 * `description(pattern)`: Commits that have a description matching the given
   [string pattern](#string-patterns).
@@ -383,8 +389,8 @@ revsets (expressions) as arguments.
 * `author_email(pattern)`: Commits with the author's email matching the given
   [string pattern](#string-patterns).
 
-* `author_date(pattern)`: Commits with author dates matching the specified [date
-  pattern](#date-patterns).
+* `author_date(pattern)`: Commits with [author dates](glossary.md#author-date)
+  matching the specified [date pattern](#date-patterns).
 
 * `mine()`: Commits where the author's email matches the email of the current
   user. Equivalent to `author_email(exact-i:<user-email>)`
@@ -399,8 +405,9 @@ revsets (expressions) as arguments.
 * `committer_email(pattern)`: Commits with the committer's email matching the
   given [string pattern](#string-patterns).
 
-* `committer_date(pattern)`: Commits with committer dates matching the specified
-  [date pattern](#date-patterns).
+* `committer_date(pattern)`: Commits with
+  [committer dates](glossary.md#committer-date) matching the specified [date
+  pattern](#date-patterns).
 
 * `signed()`: Commits that are cryptographically signed.
 
@@ -576,10 +583,28 @@ For example:
 
 ```toml
 [revset-aliases]
-'HEAD' = '@-'
+HEAD = '@-'
 'user()' = 'user("me@example.org")'
 'user(x)' = 'author(x) | committer(x)'
 'grep:x' = 'description(regex:x)'
+```
+
+### Alias descriptions
+
+Alias descriptions can be surfaced in shell completions by defining the alias
+as a table with `.doc` and `.definition` properties. For example:
+
+```toml
+[revset-aliases]
+HEAD = { definition = '@-', doc = 'The parent of the working-copy commit' }
+```
+
+You can also use the dotted key syntax:
+
+```toml
+[revset-aliases]
+HEAD.definition = '@-'
+HEAD.doc = 'The parent of the working-copy commit'
 ```
 
 ### Built-in Aliases
@@ -606,6 +631,11 @@ for a comprehensive list.
   [revset-aliases]
   'trunk()' = 'your-bookmark@your-remote'
   ```
+
+* `builtin_log()`: Resolves to `present(@) |
+  ancestors(immutable_heads().., 2) | trunk()`. It is used as the default value
+  for `revsets.log`, which is the set of revisions shown by `jj log` if no
+  revisions or paths are specified.
 
 * `builtin_immutable_heads()`: Resolves to `trunk() | tags() |
   untracked_remote_bookmarks()`. It is used as the default definition for

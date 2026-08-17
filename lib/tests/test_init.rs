@@ -52,12 +52,14 @@ fn test_init_local() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn test_init_internal_git() -> TestResult {
+#[test_case(gix::hash::Kind::Sha1 ; "sha1")]
+#[test_case(gix::hash::Kind::Sha256; "sha256")]
+fn test_init_internal_git(object_hash: gix::hash::Kind) -> TestResult {
     let settings = testutils::user_settings();
     let temp_dir = testutils::new_temp_dir();
     let (canonical, uncanonical) = canonicalize(temp_dir.path());
-    let (workspace, repo) = Workspace::init_internal_git(&settings, &uncanonical).block_on()?;
+    let (workspace, repo) =
+        Workspace::init_internal_git(&settings, &uncanonical, object_hash).block_on()?;
     let git_backend: &GitBackend = repo.store().backend_impl().unwrap();
     let repo_path = canonical.join(".jj").join("repo");
     assert_eq!(workspace.workspace_root(), &canonical);
@@ -77,12 +79,14 @@ fn test_init_internal_git() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn test_init_colocated_git() -> TestResult {
+#[test_case(gix::hash::Kind::Sha1 ; "sha1")]
+#[test_case(gix::hash::Kind::Sha256; "sha256")]
+fn test_init_colocated_git(object_hash: gix::hash::Kind) -> TestResult {
     let settings = testutils::user_settings();
     let temp_dir = testutils::new_temp_dir();
     let (canonical, uncanonical) = canonicalize(temp_dir.path());
-    let (workspace, repo) = Workspace::init_colocated_git(&settings, &uncanonical).block_on()?;
+    let (workspace, repo) =
+        Workspace::init_colocated_git(&settings, &uncanonical, object_hash).block_on()?;
     let git_backend: &GitBackend = repo.store().backend_impl().unwrap();
     let repo_path = canonical.join(".jj").join("repo");
     assert_eq!(workspace.workspace_root(), &canonical);
@@ -185,7 +189,7 @@ fn test_init_load_non_utf8_path() -> TestResult {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt as _;
 
-    use jj_lib::workspace::default_working_copy_factories;
+    use jj_lib::default_backend_factories::default_working_copy_factories;
     use pollster::FutureExt as _;
     use testutils::TestEnvironment;
 
@@ -215,7 +219,7 @@ fn test_init_load_non_utf8_path() -> TestResult {
     let workspace = Workspace::load(
         &settings,
         &workspace_root,
-        &test_env.default_store_factories(),
+        &test_env.default_backend_factories(),
         &default_working_copy_factories(),
     )?;
 

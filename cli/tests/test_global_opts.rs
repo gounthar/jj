@@ -228,6 +228,144 @@ fn test_ignore_working_copy() {
 }
 
 #[test]
+fn test_no_integrate_operation() {
+    let test_env = TestEnvironment::default();
+    test_env
+        .run_jj_in(test_env.env_root(), &["git", "init", "repo"])
+        .success();
+
+    let repo_path = test_env.env_root().join("repo");
+
+    std::fs::write(repo_path.join("file1"), "initial").unwrap();
+    test_env
+        .run_jj_in(&repo_path, &["commit", "-m=initial"])
+        .success();
+    let op_log_output = test_env.run_jj_in(&repo_path, &["op", "log"]);
+    let working_copy_output = test_env.run_jj_in(&repo_path, &["debug", "working-copy"]);
+
+    // Modify the working copy and run a mutating operation. With
+    // --no-integrate-operation, the working copy gets snapshotted and the operation
+    // gets created, but there's no new operation in the operation log, and the
+    // working copy state is not updated.
+    std::fs::write(repo_path.join("file2"), "initial").unwrap();
+    let output = test_env.run_jj_in(&repo_path, &["squash", "--no-integrate-operation"]);
+    insta::assert_snapshot!(output.stdout, @"");
+    insta::assert_snapshot!(output.stderr, @"
+    Snapshot operation left uncommitted because --no-integrate-operation was requested: 1b6e5938fe7e
+    Operation left uncommitted because --no-integrate-operation was requested: 0e885c491646
+    [EOF]
+    ");
+    let stderr = output.stderr.into_raw();
+    let last_line = stderr.lines().last().unwrap();
+    let op_id_hex = last_line[last_line.len() - 12..].to_string();
+    let output = test_env.run_jj_in(&repo_path, &["op", "log", "--ignore-working-copy"]);
+    assert_eq!(output.stdout, op_log_output.stdout);
+    let output = test_env.run_jj_in(&repo_path, &["debug", "working-copy"]);
+    assert_eq!(output.stdout, working_copy_output.stdout);
+
+    // We can see the resulting log and op log with --at-op
+    let stdout = test_env.run_jj_in(&repo_path, &["log", "-s", "--at-op", op_id_hex.as_str()]);
+    insta::assert_snapshot!(stdout, @"
+    @  mzvwutvl test.user@example.com 2001-02-03 08:05:11 10644da4
+    │  (empty) (no description set)
+    ○  qpvuntsm test.user@example.com 2001-02-03 08:05:11 599772f7
+    │  initial
+    │  A file1
+    │  A file2
+    ◆  zzzzzzzz root() 00000000
+    [EOF]
+    ");
+    let stdout = test_env.run_jj_in(&repo_path, &["op", "log", "--at-op", op_id_hex.as_str()]);
+    insta::assert_snapshot!(stdout, @"
+    @  0e885c491646 test-username@host.example.com default@ 2001-02-03 04:05:11.000 +07:00 - 2001-02-03 04:05:11.000 +07:00
+    │  squash commits into e6fc2362ee5fdd5eb879befc0ae556a2f57b94a0
+    │  args: jj squash --no-integrate-operation
+    ○  1b6e5938fe7e test-username@host.example.com default@ 2001-02-03 04:05:11.000 +07:00 - 2001-02-03 04:05:11.000 +07:00
+    │  snapshot working copy
+    │  args: jj squash --no-integrate-operation
+    ○  8d4c74253280 test-username@host.example.com default@ 2001-02-03 04:05:08.000 +07:00 - 2001-02-03 04:05:08.000 +07:00
+    │  commit 289d54a4554ed0d7df9c47d566480a6b773ee431
+    │  args: jj commit '-m=initial'
+    ○  65136c03793e test-username@host.example.com default@ 2001-02-03 04:05:08.000 +07:00 - 2001-02-03 04:05:08.000 +07:00
+    │  snapshot working copy
+    │  args: jj commit '-m=initial'
+    ○  f63ee16f9553 test-username@host.example.com 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00
+    │  add workspace 'default'
+    ○  000000000000 root()
+    [EOF]
+    ");
+}
+
+#[test]
+fn test_no_integrate_operation_colocated() {
+    let test_env = TestEnvironment::default();
+    test_env
+        .run_jj_in(test_env.env_root(), &["git", "init", "--colocate", "repo"])
+        .success();
+
+    let repo_path = test_env.env_root().join("repo");
+
+    std::fs::write(repo_path.join("file1"), "initial").unwrap();
+    test_env
+        .run_jj_in(&repo_path, &["commit", "-m=initial"])
+        .success();
+    let op_log_output = test_env.run_jj_in(&repo_path, &["op", "log"]);
+    let working_copy_output = test_env.run_jj_in(&repo_path, &["debug", "working-copy"]);
+
+    // Modify the working copy and run a mutating operation. With
+    // --no-integrate-operation, the working copy gets snapshotted and the operation
+    // gets created, but there's no new operation in the operation log, and the
+    // working copy state is not updated.
+    std::fs::write(repo_path.join("file2"), "initial").unwrap();
+    let output = test_env.run_jj_in(&repo_path, &["squash", "--no-integrate-operation"]);
+    insta::assert_snapshot!(output.stdout, @"");
+    insta::assert_snapshot!(output.stderr, @"
+    Snapshot operation left uncommitted because --no-integrate-operation was requested: 62fa29d079c6
+    Operation left uncommitted because --no-integrate-operation was requested: ba14e2cc9e65
+    [EOF]
+    ");
+    let stderr = output.stderr.into_raw();
+    let last_line = stderr.lines().last().unwrap();
+    let op_id_hex = last_line[last_line.len() - 12..].to_string();
+    let output = test_env.run_jj_in(&repo_path, &["op", "log", "--ignore-working-copy"]);
+    assert_eq!(output.stdout, op_log_output.stdout);
+    let output = test_env.run_jj_in(&repo_path, &["debug", "working-copy"]);
+    assert_eq!(output.stdout, working_copy_output.stdout);
+
+    // We can see the resulting log and op log with --at-op
+    let stdout = test_env.run_jj_in(&repo_path, &["log", "-s", "--at-op", op_id_hex.as_str()]);
+    insta::assert_snapshot!(stdout, @"
+    @  mzvwutvl test.user@example.com 2001-02-03 08:05:11 10644da4
+    │  (empty) (no description set)
+    ○  qpvuntsm test.user@example.com 2001-02-03 08:05:11 599772f7
+    │  initial
+    │  A file1
+    │  A file2
+    ◆  zzzzzzzz root() 00000000
+    [EOF]
+    ");
+    let stdout = test_env.run_jj_in(&repo_path, &["op", "log", "--at-op", op_id_hex.as_str()]);
+    insta::assert_snapshot!(stdout, @"
+    @  ba14e2cc9e65 test-username@host.example.com default@ 2001-02-03 04:05:11.000 +07:00 - 2001-02-03 04:05:11.000 +07:00
+    │  squash commits into e6fc2362ee5fdd5eb879befc0ae556a2f57b94a0
+    │  args: jj squash --no-integrate-operation
+    ○  62fa29d079c6 test-username@host.example.com default@ 2001-02-03 04:05:11.000 +07:00 - 2001-02-03 04:05:11.000 +07:00
+    │  snapshot working copy
+    │  args: jj squash --no-integrate-operation
+    ○  b1b9a22805e6 test-username@host.example.com default@ 2001-02-03 04:05:08.000 +07:00 - 2001-02-03 04:05:08.000 +07:00
+    │  commit 289d54a4554ed0d7df9c47d566480a6b773ee431
+    │  args: jj commit '-m=initial'
+    ○  65136c03793e test-username@host.example.com default@ 2001-02-03 04:05:08.000 +07:00 - 2001-02-03 04:05:08.000 +07:00
+    │  snapshot working copy
+    │  args: jj commit '-m=initial'
+    ○  f63ee16f9553 test-username@host.example.com 2001-02-03 04:05:07.000 +07:00 - 2001-02-03 04:05:07.000 +07:00
+    │  add workspace 'default'
+    ○  000000000000 root()
+    [EOF]
+    ");
+}
+
+#[test]
 fn test_repo_arg_with_git_init() {
     let test_env = TestEnvironment::default();
     let output = test_env.run_jj_in(".", ["git", "init", "-R=.", "repo"]);
@@ -366,8 +504,8 @@ fn test_bad_path() {
       | ^---^
       |
       = Invalid file pattern
-    2: Path "../.." is not in the repo "../"
-    3: Invalid component ".." in repo-relative path "../"
+    2: Path "../.." is not in the repo ".."
+    3: Invalid component ".." in repo-relative path ".."
     [EOF]
     [exit status: 1]
     "#);
@@ -586,6 +724,37 @@ fn test_color_config() {
 }
 
 #[test]
+fn test_pager_env_config() {
+    let mut test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    test_env.add_config(r#"ui.pager = "user""#);
+    test_env.add_env_var("PAGER", "env-base");
+    test_env.add_env_var("JJ_PAGER", "env-override");
+    let work_dir = test_env.work_dir("repo");
+
+    let output = work_dir.run_jj(["config", "list", "ui.pager", "--include-overridden"]);
+    insta::assert_snapshot!(output, @r#"
+        # ui.pager = "user"
+        ui.pager = "env-override"
+        [EOF]
+    "#);
+
+    let output = work_dir.run_jj([
+        "config",
+        "list",
+        "ui.pager",
+        "--include-overridden",
+        "--config=ui.pager=\"command-arg\"",
+    ]);
+    insta::assert_snapshot!(output, @r#"
+        # ui.pager = "user"
+        # ui.pager = "env-override"
+        ui.pager = "command-arg"
+        [EOF]
+    "#);
+}
+
+#[test]
 fn test_color_ui_messages() {
     let test_env = TestEnvironment::default();
     test_env.run_jj_in(".", ["git", "init", "repo"]).success();
@@ -616,7 +785,7 @@ fn test_color_ui_messages() {
     [39m  |[39m
     [39m  = Invalid file pattern[39m
     [1m[39m2: [0m[39mPath ".." is not in the repo "."[39m
-    [1m[39m3: [0m[39mInvalid component ".." in repo-relative path "../"[39m
+    [1m[39m3: [0m[39mInvalid component ".." in repo-relative path ".."[39m
     [EOF]
     [exit status: 1]
     "#);
@@ -686,6 +855,66 @@ fn test_quiet() {
     work_dir.write_file("file1", "contents");
     let output = work_dir.run_jj(["--quiet", "describe", "-m=new description"]);
     insta::assert_snapshot!(output, @"");
+}
+
+#[test]
+fn test_repeated_args() {
+    // Repeating an argument should be harmless rather than an error, so that an
+    // argument baked into an alias (or a wrapper command) can also be passed
+    // explicitly. See https://github.com/jj-vcs/jj/issues/9859 and
+    // https://github.com/jj-vcs/jj/issues/8101.
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    // `--no-pager` is parsed by the early args parser, `--ignore-working-copy`
+    // is not. The repetition is accepted wherever the occurrences sit relative
+    // to the subcommand.
+    for flag in ["--no-pager", "--ignore-working-copy"] {
+        work_dir.run_jj([flag, flag, "status"]).success();
+        work_dir.run_jj([flag, "status", flag]).success();
+        work_dir.run_jj(["status", flag, flag]).success();
+    }
+
+    // Arguments of subcommands are covered as well.
+    let output = work_dir.run_jj(["log", "--no-graph", "-T=description"]);
+    let repeated_output = work_dir.run_jj(["log", "--no-graph", "--no-graph", "-T=description"]);
+    assert_eq!(repeated_output, output);
+
+    // Repeating a flag must not disable it: `--quiet` twice still suppresses
+    // the message about the new working-copy commit.
+    let output = work_dir.run_jj(["--quiet", "--quiet", "describe", "-m=new description"]);
+    insta::assert_snapshot!(output, @"");
+
+    // For an option that takes a value, the last occurrence wins.
+    work_dir.run_jj(["new", "-m=child"]).success();
+    let output = work_dir.run_jj(["log", "--no-graph", "-T=description", "-n=1", "-n=2"]);
+    insta::assert_snapshot!(output, @r"
+    child
+    new description
+    [EOF]
+    ");
+    work_dir.run_jj(["status", "-R=.", "-R=."]).success();
+
+    // Options that can be specified multiple times keep all of their values.
+    let output = work_dir.run_jj([
+        "--config=user.name=Custom User",
+        "--config=user.email=custom@example.com",
+        "config",
+        "list",
+        "user",
+    ]);
+    insta::assert_snapshot!(output, @r#"
+    user.name = "Custom User"
+    user.email = "custom@example.com"
+    [EOF]
+    "#);
+    let output = work_dir.run_jj(["log", "--no-graph", "-T=description", "-r=@", "-r=@-"]);
+    insta::assert_snapshot!(output, @r"
+    child
+    new description
+    [EOF]
+    ");
 }
 
 #[test]
@@ -1033,7 +1262,6 @@ fn test_default_config() -> TestResult {
     insta::assert_snapshot!(output, @r#"
     ------- stderr -------
     Initialized repo in "repo"
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
 
@@ -1152,8 +1380,9 @@ fn test_help() {
     Global Options:
       -R, --repository <REPOSITORY>      Path to repository to operate on
           --ignore-working-copy          Don't snapshot the working copy, and don't update it
+          --no-integrate-operation       Run the command as usual but don't integrate any operations
           --ignore-immutable             Allow rewriting immutable commits
-          --at-operation <AT_OPERATION>  Operation to load the repo at [aliases: --at-op]
+          --at-operation <AT_OPERATION>  Operation to load the repo at [alias: --at-op]
           --debug                        Enable debug logging
           --color <WHEN>                 When to colorize output [possible values: always, never, debug,
                                          auto]

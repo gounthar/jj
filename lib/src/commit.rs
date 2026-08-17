@@ -38,6 +38,7 @@ use crate::merge::Merge;
 use crate::merged_tree::MergedTree;
 use crate::repo::Repo;
 use crate::rewrite::merge_commit_trees;
+use crate::rewrite::merge_commit_trees_no_resolve;
 use crate::signing::SignResult;
 use crate::signing::Verification;
 use crate::store::Store;
@@ -134,17 +135,30 @@ impl Commit {
         // Avoid merging parent trees if known to be empty. The index could be
         // queried only when parents.len() > 1, but index query would be cheaper
         // than extracting parent commit from the store.
-        if is_commit_empty_by_index(repo, &self.id)? == Some(true) {
+        if is_commit_empty_by_index(repo, &self.id).await? == Some(true) {
             return Ok(self.tree());
         }
         let parents = self.parents().await?;
         merge_commit_trees(repo, &parents).await
     }
 
+    /// Returns the parent tree, merging the parent trees if there are multiple
+    /// parents, without resolving conflicts.
+    pub async fn parent_tree_no_resolve(&self, repo: &dyn Repo) -> BackendResult<MergedTree> {
+        // Avoid merging parent trees if known to be empty. The index could be
+        // queried only when parents.len() > 1, but index query would be cheaper
+        // than extracting parent commit from the store.
+        if is_commit_empty_by_index(repo, &self.id).await? == Some(true) {
+            return Ok(self.tree());
+        }
+        let parents = self.parents().await?;
+        merge_commit_trees_no_resolve(repo, &parents).await
+    }
+
     /// Returns whether commit's content is empty. Commit description is not
     /// taken into consideration.
     pub async fn is_empty(&self, repo: &dyn Repo) -> BackendResult<bool> {
-        if let Some(empty) = is_commit_empty_by_index(repo, &self.id)? {
+        if let Some(empty) = is_commit_empty_by_index(repo, &self.id).await? {
             return Ok(empty);
         }
         is_backend_commit_empty(repo, &self.store, &self.data).await
@@ -175,8 +189,8 @@ impl Commit {
     }
 
     ///  A commit is hidden if its commit id is not in the change id index.
-    pub fn is_hidden(&self, repo: &dyn Repo) -> IndexResult<bool> {
-        let maybe_targets = repo.resolve_change_id(self.change_id())?;
+    pub async fn is_hidden(&self, repo: &dyn Repo) -> IndexResult<bool> {
+        let maybe_targets = repo.resolve_change_id(self.change_id()).await?;
         Ok(maybe_targets.is_none_or(|targets| !targets.has_visible(&self.id)))
     }
 
@@ -256,10 +270,11 @@ pub(crate) async fn is_backend_commit_empty(
     Ok(commit.root_tree == *parent_tree.tree_ids())
 }
 
-fn is_commit_empty_by_index(repo: &dyn Repo, id: &CommitId) -> BackendResult<Option<bool>> {
+async fn is_commit_empty_by_index(repo: &dyn Repo, id: &CommitId) -> BackendResult<Option<bool>> {
     let maybe_paths = repo
         .index()
         .changed_paths_in_commit(id)
+        .await
         // TODO: index error shouldn't be a "BackendError"
         .map_err(|err| BackendError::Other(err.into()))?;
     Ok(maybe_paths.map(|mut paths| paths.next().is_none()))

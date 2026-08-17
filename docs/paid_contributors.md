@@ -15,13 +15,15 @@ See [contribution docs](contributing.md#code-reviews) for details on this policy
 * ConnerPetzold
 * davidbarsky
 * ilyagr
+* martinvonz
 * steveklabnik
 * thoughtpolice
 
-## Google
+## Alphabet/Google
 
 * 06393993
 * 2079884FDavid
+* ajaspers
 * algmyr
 * AM5800
 * aspotashev
@@ -42,7 +44,6 @@ See [contribution docs](contributing.md#code-reviews) for details on this policy
 * kevincliao
 * kiranani
 * lukegb
-* martinvonz
 * matts1
 * matttproud
 * michaelchirico
@@ -52,6 +53,7 @@ See [contribution docs](contributing.md#code-reviews) for details on this policy
 * qfel
 * Ralith
 * rdamazio
+* sbarfurth
 * solson
 * spectral54
 * steadmon
@@ -60,4 +62,5 @@ See [contribution docs](contributing.md#code-reviews) for details on this policy
 
 ## IMC Trading
 
+* freundTech
 * HoelzelJon

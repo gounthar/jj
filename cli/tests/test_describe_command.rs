@@ -299,10 +299,10 @@ fn test_describe_multiple_commits() -> TestResult {
 
     // Set the description of multiple commits using `-m` flag
     let output = work_dir.run_jj(["describe", "-r@", "-r@--", "-m", "description from CLI"]);
-    insta::assert_snapshot!(output, @"
+    insta::assert_snapshot!(output, @r"
     ------- stderr -------
-    Updated 2 commits
-    Rebased 1 descendant commits
+    Updated 2 commits.
+    Rebased 1 descendant commits.
     Working copy  (@) now at: kkmpptxz 4c3ccb9d (empty) description from CLI
     Parent commit (@-)      : rlvkpnrz 650ac8f2 (empty) (no description set)
     [EOF]
@@ -368,9 +368,9 @@ fn test_describe_multiple_commits() -> TestResult {
         "},
     )?;
     let output = work_dir.run_jj(["describe", "@", "@-"]);
-    insta::assert_snapshot!(output, @"
+    insta::assert_snapshot!(output, @r"
     ------- stderr -------
-    Updated 2 commits
+    Updated 2 commits.
     Working copy  (@) now at: kkmpptxz 87c0f3c7 (empty) description from editor of @
     Parent commit (@-)      : rlvkpnrz 9b9041eb (empty) description from editor of @-
     [EOF]
@@ -529,10 +529,10 @@ fn test_describe_multiple_commits() -> TestResult {
         "},
     )?;
     let output = work_dir.run_jj(["describe", "@-", "@--"]);
-    insta::assert_snapshot!(output, @"
+    insta::assert_snapshot!(output, @r"
     ------- stderr -------
-    Updated 2 commits
-    Rebased 1 descendant commits
+    Updated 2 commits.
+    Rebased 1 descendant commits.
     Working copy  (@) now at: kkmpptxz 5a6249e9 (empty) description from editor of @
     Parent commit (@-)      : rlvkpnrz d1c1edbd (empty) description from editor for @-
     [EOF]
@@ -547,6 +547,118 @@ fn test_describe_multiple_commits() -> TestResult {
     [EOF]
     ");
     Ok(())
+}
+
+#[test]
+fn test_describe_with_draft_template() {
+    let mut test_env = TestEnvironment::default();
+    let edit_script = test_env.set_up_fake_editor();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    // Initial setup
+    work_dir.write_file("a.txt", "aaaa\nbbbb\ncccc\n");
+    work_dir.run_jj(["commit", "-m=first"]).success();
+    work_dir.write_file("a.txt", b"aaaa\ncccc\ndddd\n\xff\n");
+    work_dir.run_jj(["describe", "-m=second"]).success();
+    insta::assert_snapshot!(get_log_output(&work_dir), @"
+    @  c43cce883e27 second
+    ○  8620a92b036c first
+    ◆  000000000000
+    [EOF]
+    ");
+
+    // Dump the default commit description template
+    std::fs::write(&edit_script, "dump editor0").unwrap();
+    let output = work_dir.run_jj(["describe"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Nothing changed.
+    [EOF]
+    ");
+    insta::assert_snapshot!(
+        std::fs::read_to_string(test_env.env_root().join("editor0")).unwrap(), @r#"
+    second
+
+    JJ: Change ID: rlvkpnrz
+    JJ: This commit contains the following changes:
+    JJ:     M a.txt
+    JJ:
+    JJ: Lines starting with "JJ:" (like this one) will be removed.
+    "#);
+
+    // Builtin template with diff content
+    std::fs::write(&edit_script, "dump editor0").unwrap();
+    let output = work_dir.run_jj([
+        "describe",
+        "--config=templates.draft_commit_description='builtin_draft_commit_description_with_diff'",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Nothing changed.
+    [EOF]
+    ");
+    insta::assert_snapshot!(
+        std::fs::read_to_string(test_env.env_root().join("editor0")).unwrap(), @r#"
+    second
+
+    JJ: Change ID: rlvkpnrz
+    JJ: This commit contains the following changes:
+    JJ:     M a.txt
+
+    JJ: ignore-rest
+    diff --git a/a.txt b/a.txt
+    index edd13ee535..12e5763da1 100644
+    --- a/a.txt
+    +++ b/a.txt
+    @@ -1,3 +1,4 @@
+     aaaa
+    -bbbb
+     cccc
+    +dddd
+    +�
+
+    JJ: Lines starting with "JJ:" (like this one) will be removed.
+    "#);
+
+    // Newline auto-inserted when template produces content without newline
+    std::fs::write(&edit_script, "dump editor0").unwrap();
+    let output = work_dir.run_jj([
+        "describe",
+        "--config=templates.draft_commit_description='change_id'",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Working copy  (@) now at: rlvkpnrz 1fd03b68 rlvkpnrzqnoowoytxnquwvuryrwnrmlp
+    Parent commit (@-)      : qpvuntsm 8620a92b first
+    [EOF]
+    ");
+    insta::assert_snapshot!(
+        std::fs::read_to_string(test_env.env_root().join("editor0")).unwrap(), @r#"
+    rlvkpnrzqnoowoytxnquwvuryrwnrmlp
+
+    JJ: Lines starting with "JJ:" (like this one) will be removed.
+    "#);
+
+    // Newline auto-inserted when template produces empty string
+    std::fs::write(&edit_script, "dump editor0").unwrap();
+    let output = work_dir.run_jj([
+        "describe",
+        r#"--config=templates.draft_commit_description='""'"#,
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Working copy  (@) now at: rlvkpnrz b59daf76 (no description set)
+    Parent commit (@-)      : qpvuntsm 8620a92b first
+    [EOF]
+    ");
+    let editor0 = std::fs::read_to_string(test_env.env_root().join("editor0")).unwrap();
+    insta::assert_snapshot!(format!("-----\n{editor0}-----\n"), @r#"
+    -----
+
+    JJ: Lines starting with "JJ:" (like this one) will be removed.
+    -----
+    "#);
 }
 
 #[test]
@@ -620,6 +732,35 @@ fn test_multiple_message_args() {
 }
 
 #[test]
+fn test_describe_description_file_removed() {
+    let mut test_env = TestEnvironment::default();
+    let edit_script = test_env.set_up_fake_editor();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    // Description file misplaced by the user or a faulty editor
+    std::fs::write(edit_script, "delete").unwrap();
+    let output = work_dir.run_jj(["describe"]);
+    insta::with_settings!({
+        filters => [
+            (r"(access|in) .*(editor-)[^.]*(\.jjdescription)\b", "$1 <redacted>$2<redacted>$3"),
+            ("The system cannot find the file specified.", "No such file or directory"),
+        ],
+    }, {
+        insta::assert_snapshot!(output, @"
+        ------- stderr -------
+        Error: Failed to edit description
+        Caused by:
+        1: Cannot access <redacted>editor-<redacted>.jjdescription
+        2: No such file or directory (os error 2)
+        Hint: Edited description is left in <redacted>editor-<redacted>.jjdescription
+        [EOF]
+        [exit status: 1]
+        ");
+    });
+}
+
+#[test]
 fn test_describe_stdin_description() {
     let test_env = TestEnvironment::default();
     test_env.run_jj_in(".", ["git", "init", "repo"]).success();
@@ -675,196 +816,6 @@ fn test_describe_default_description() -> TestResult {
     JJ: Lines starting with "JJ:" (like this one) will be removed.
     "#);
 
-    // Default description shouldn't be used if --no-edit
-    work_dir.run_jj(["new", "root()"]).success();
-    let output = work_dir.run_jj(["describe", "--no-edit", "--reset-author"]);
-    insta::assert_snapshot!(output, @"
-    ------- stderr -------
-    Warning: `jj describe --no-edit` is deprecated; use `jj metaedit` instead
-    Warning: `jj describe --reset-author` is deprecated; use `jj metaedit --update-author` instead
-    Working copy  (@) now at: kkmpptxz 7118bcb8 (empty) (no description set)
-    Parent commit (@-)      : zzzzzzzz 00000000 (empty) (no description set)
-    [EOF]
-    ");
-    Ok(())
-}
-
-#[test]
-fn test_describe_author() -> TestResult {
-    let mut test_env = TestEnvironment::default();
-    let edit_script = test_env.set_up_fake_editor();
-    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
-    let work_dir = test_env.work_dir("repo");
-
-    std::fs::write(edit_script, ["dump editor"].join("\0"))?;
-
-    test_env.add_config(indoc! {r#"
-        [template-aliases]
-        'format_signature(signature)' = 'signature.name() ++ " " ++ signature.email() ++ " " ++ signature.timestamp()'
-
-        [templates]
-        draft_commit_description = '''
-        concat(
-          description,
-          "\n",
-          indent(
-            "JJ: ",
-            concat(
-              "Author: " ++ format_detailed_signature(author) ++ "\n",
-              "Committer: " ++ format_detailed_signature(committer)  ++ "\n",
-              "\n",
-              diff.stat(76),
-            ),
-          ),
-        )
-        '''
-    "#});
-    let get_signatures = || {
-        let template = r#"format_signature(author) ++ "\n" ++ format_signature(committer)"#;
-        work_dir.run_jj(["log", "-r..", "-T", template])
-    };
-
-    // Initial setup
-    work_dir.run_jj(["new"]).success();
-    work_dir.run_jj(["new"]).success();
-    work_dir.run_jj(["new"]).success();
-    insta::assert_snapshot!(get_signatures(), @"
-    @  Test User test.user@example.com 2001-02-03 04:05:10.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:10.000 +07:00
-    ○  Test User test.user@example.com 2001-02-03 04:05:09.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:09.000 +07:00
-    ○  Test User test.user@example.com 2001-02-03 04:05:08.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:08.000 +07:00
-    ○  Test User test.user@example.com 2001-02-03 04:05:07.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:07.000 +07:00
-    ~
-    [EOF]
-    ");
-
-    // Change the author for the latest commit (the committer is always reset)
-    work_dir
-        .run_jj([
-            "describe",
-            "--author",
-            "Super Seeder <super.seeder@example.com>",
-        ])
-        .success();
-    insta::assert_snapshot!(get_signatures(), @"
-    @  Super Seeder super.seeder@example.com 2001-02-03 04:05:12.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:12.000 +07:00
-    ○  Test User test.user@example.com 2001-02-03 04:05:09.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:09.000 +07:00
-    ○  Test User test.user@example.com 2001-02-03 04:05:08.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:08.000 +07:00
-    ○  Test User test.user@example.com 2001-02-03 04:05:07.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:07.000 +07:00
-    ~
-    [EOF]
-    ");
-    insta::assert_snapshot!(
-        std::fs::read_to_string(test_env.env_root().join("editor"))?, @r#"
-
-    JJ: Author: Super Seeder <super.seeder@example.com> (2001-02-03 08:05:12)
-    JJ: Committer: Test User <test.user@example.com> (2001-02-03 08:05:12)
-
-    JJ: 0 files changed, 0 insertions(+), 0 deletions(-)
-    JJ:
-    JJ: Lines starting with "JJ:" (like this one) will be removed.
-    "#);
-
-    // Change the author for multiple commits (the committer is always reset)
-    work_dir
-        .run_jj([
-            "describe",
-            "@---",
-            "@-",
-            "--no-edit",
-            "--author",
-            "Super Seeder <super.seeder@example.com>",
-        ])
-        .success();
-    insta::assert_snapshot!(get_signatures(), @"
-    @  Super Seeder super.seeder@example.com 2001-02-03 04:05:12.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:14.000 +07:00
-    ○  Super Seeder super.seeder@example.com 2001-02-03 04:05:14.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:14.000 +07:00
-    ○  Test User test.user@example.com 2001-02-03 04:05:14.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:14.000 +07:00
-    ○  Super Seeder super.seeder@example.com 2001-02-03 04:05:14.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:14.000 +07:00
-    ~
-    [EOF]
-    ");
-
-    // Reset the author for the latest commit (the committer is always reset)
-    work_dir
-        .run_jj([
-            "describe",
-            "--config=user.name=Ove Ridder",
-            "--config=user.email=ove.ridder@example.com",
-            "--no-edit",
-            "--reset-author",
-        ])
-        .success();
-    insta::assert_snapshot!(get_signatures(), @"
-    @  Ove Ridder ove.ridder@example.com 2001-02-03 04:05:16.000 +07:00
-    │  Ove Ridder ove.ridder@example.com 2001-02-03 04:05:16.000 +07:00
-    ○  Super Seeder super.seeder@example.com 2001-02-03 04:05:14.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:14.000 +07:00
-    ○  Test User test.user@example.com 2001-02-03 04:05:14.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:14.000 +07:00
-    ○  Super Seeder super.seeder@example.com 2001-02-03 04:05:14.000 +07:00
-    │  Test User test.user@example.com 2001-02-03 04:05:14.000 +07:00
-    ~
-    [EOF]
-    ");
-
-    // Reset the author for multiple commits (the committer is always reset)
-    work_dir
-        .run_jj([
-            "describe",
-            "@---",
-            "@-",
-            "--config=user.name=Ove Ridder",
-            "--config=user.email=ove.ridder@example.com",
-            "--reset-author",
-        ])
-        .success();
-    insta::assert_snapshot!(get_signatures(), @"
-    @  Ove Ridder ove.ridder@example.com 2001-02-03 04:05:18.000 +07:00
-    │  Ove Ridder ove.ridder@example.com 2001-02-03 04:05:18.000 +07:00
-    ○  Ove Ridder ove.ridder@example.com 2001-02-03 04:05:18.000 +07:00
-    │  Ove Ridder ove.ridder@example.com 2001-02-03 04:05:18.000 +07:00
-    ○  Test User test.user@example.com 2001-02-03 04:05:14.000 +07:00
-    │  Ove Ridder ove.ridder@example.com 2001-02-03 04:05:18.000 +07:00
-    ○  Ove Ridder ove.ridder@example.com 2001-02-03 04:05:18.000 +07:00
-    │  Ove Ridder ove.ridder@example.com 2001-02-03 04:05:18.000 +07:00
-    ~
-    [EOF]
-    ");
-    insta::assert_snapshot!(
-        std::fs::read_to_string(test_env.env_root().join("editor"))?, @r#"
-    JJ: Enter or edit commit descriptions after the `JJ: describe` lines.
-    JJ: Warning:
-    JJ: - The text you enter will be lost on a syntax error.
-    JJ: - The syntax of the separator lines may change in the future.
-    JJ:
-    JJ: describe b6fdbcc93170 -------
-
-    JJ: Author: Ove Ridder <ove.ridder@example.com> (2001-02-03 08:05:18)
-    JJ: Committer: Ove Ridder <ove.ridder@example.com> (2001-02-03 08:05:18)
-
-    JJ: 0 files changed, 0 insertions(+), 0 deletions(-)
-    JJ:
-    JJ: describe 3c9fefe4bede -------
-
-    JJ: Author: Ove Ridder <ove.ridder@example.com> (2001-02-03 08:05:18)
-    JJ: Committer: Ove Ridder <ove.ridder@example.com> (2001-02-03 08:05:18)
-
-    JJ: 0 files changed, 0 insertions(+), 0 deletions(-)
-    JJ:
-    JJ: Lines starting with "JJ:" (like this one) will be removed.
-    "#);
     Ok(())
 }
 
@@ -944,47 +895,10 @@ fn test_describe_change_with_existing_message_with_editor_and_message_args_opens
 }
 
 #[test]
-fn test_editor_cannot_be_used_with_no_edit() {
-    let test_env = TestEnvironment::default();
-    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
-    let work_dir = test_env.work_dir("repo");
-
-    let output = work_dir.run_jj(["describe", "--no-edit", "--editor"]);
-    insta::assert_snapshot!(output, @"
-    ------- stderr -------
-    error: the argument '--no-edit' cannot be used with '--editor'
-
-    Usage: jj describe [OPTIONS] [REVSETS]...
-
-    For more information, try '--help'.
-    [EOF]
-    [exit status: 2]
-    ");
-}
-
-#[test]
-fn test_describe_deprecated_edit_flag() -> TestResult {
-    let mut test_env = TestEnvironment::default();
-    let edit_script = test_env.set_up_fake_editor();
-    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
-    let work_dir = test_env.work_dir("repo");
-
-    std::fs::write(edit_script, ["write\nfinal message"].join("\0"))?;
-    let output = work_dir.run_jj(["describe", "-m", "initial message", "--edit"]);
-    insta::assert_snapshot!(output, @"
-    ------- stderr -------
-    Warning: `jj describe --edit` is deprecated; use `jj describe --editor` instead
-    Working copy  (@) now at: qpvuntsm 46842128 (empty) final message
-    Parent commit (@-)      : zzzzzzzz 00000000 (empty) (no description set)
-    [EOF]
-    ");
-    Ok(())
-}
-
-#[test]
 fn test_add_trailer() {
-    let test_env = TestEnvironment::default();
+    let mut test_env = TestEnvironment::default();
     test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let _edit_script = test_env.set_up_fake_editor();
     let work_dir = test_env.work_dir("repo");
 
     // Set a description using `-m` flag
@@ -1010,16 +924,14 @@ fn test_add_trailer() {
     [EOF]
     ");
 
-    // multiple trailers may be used, and work with --no-edit
+    // multiple trailers may be used
     let output = work_dir.run_jj([
         "describe",
-        "--no-edit",
         "--config",
         r#"templates.commit_trailers='"CC: alice@example.com\nChange-Id: I6a6a6964" ++ self.change_id().normal_hex()'"#,
     ]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Warning: `jj describe --no-edit` is deprecated; use `jj metaedit` instead
     Working copy  (@) now at: qpvuntsm 2b2e302d (empty) Message from CLI
     Parent commit (@-)      : zzzzzzzz 00000000 (empty) (no description set)
     [EOF]
@@ -1038,13 +950,11 @@ fn test_add_trailer() {
     // it won't create a duplicate entry
     let output = work_dir.run_jj([
         "describe",
-        "--no-edit",
         "--config",
         r#"templates.commit_trailers='"CC: alice@example.com"'"#,
     ]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Warning: `jj describe --no-edit` is deprecated; use `jj metaedit` instead
     Nothing changed.
     [EOF]
     ");
@@ -1062,13 +972,11 @@ fn test_add_trailer() {
     // invalid generated trailers generate an error
     let output = work_dir.run_jj([
         "describe",
-        "--no-edit",
         "--config",
         r#"templates.commit_trailers='"this is an invalid trailer"'"#,
     ]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Warning: `jj describe --no-edit` is deprecated; use `jj metaedit` instead
     Error: Invalid trailer line: this is an invalid trailer
     [EOF]
     [exit status: 1]
@@ -1084,15 +992,29 @@ fn test_add_trailer() {
     ");
     let output = work_dir.run_jj([
         "describe",
-        "--no-edit",
+        "--message=",
         "--config",
         r#"templates.commit_trailers='"CC: alice@example.com"'"#,
     ]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Warning: `jj describe --no-edit` is deprecated; use `jj metaedit` instead
     Nothing changed.
     [EOF]
+    ");
+
+    // Invalid trailer content
+    work_dir.write_file("data.txt", b"\xff\n");
+    let output = work_dir.run_jj([
+        "describe",
+        "-m=content",
+        "--config",
+        r#"templates.commit_trailers='indent("Content: ", diff.git())'"#,
+    ]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Error: Trailers should be valid utf-8
+    [EOF]
+    [exit status: 1]
     ");
 }
 
@@ -1124,15 +1046,9 @@ fn test_add_trailer_committer() -> TestResult {
     ");
 
     // committer is properly set in the trailer
-    let output = work_dir.run_jj([
-        "describe",
-        "--no-edit",
-        "--config",
-        "user.email=foo@bar.org",
-    ]);
+    let output = work_dir.run_jj(["describe", "--config=user.email=foo@bar.org"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Warning: `jj describe --no-edit` is deprecated; use `jj metaedit` instead
     Working copy  (@) now at: qpvuntsm 05ddee5c (empty) Message from CLI
     Parent commit (@-)      : zzzzzzzz 00000000 (empty) (no description set)
     [EOF]

@@ -14,6 +14,7 @@
 
 use std::borrow::Cow;
 use std::cmp::max;
+use std::cmp::min;
 use std::future;
 use std::io;
 use std::iter;
@@ -32,9 +33,11 @@ use jj_lib::backend::BackendError;
 use jj_lib::backend::BackendResult;
 use jj_lib::backend::CommitId;
 use jj_lib::backend::CopyRecord;
+use jj_lib::backend::MergedTreeValue;
 use jj_lib::backend::TreeValue;
 use jj_lib::commit::Commit;
 use jj_lib::config::ConfigGetError;
+use jj_lib::config::ConfigGetResultExt as _;
 use jj_lib::conflict_labels::ConflictLabels;
 use jj_lib::conflicts::ConflictMarkerStyle;
 use jj_lib::conflicts::ConflictMaterializeOptions;
@@ -68,7 +71,6 @@ use jj_lib::matchers::Matcher;
 use jj_lib::merge::Diff;
 use jj_lib::merge::Merge;
 use jj_lib::merge::MergeBuilder;
-use jj_lib::merge::MergedTreeValue;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::repo::Repo;
 use jj_lib::repo_path::InvalidRepoPathError;
@@ -255,7 +257,7 @@ impl BuiltinFormatKind {
         match self {
             Self::Summary => Ok(DiffFormat::Summary),
             Self::Stat => {
-                let mut options = DiffStatOptions::default();
+                let mut options = DiffStatOptions::from_settings(settings)?;
                 options.merge_args(args);
                 Ok(DiffFormat::Stat(Box::new(options)))
             }
@@ -489,7 +491,13 @@ impl<'a> DiffRenderer<'a> {
                     let stats =
                         DiffStats::calculate(store, tree_diff, options, self.conflict_marker_style)
                             .await?;
-                    show_diff_stats(*formatter.labeled("stat"), &stats, path_converter, width)?;
+                    show_diff_stats(
+                        *formatter.labeled("stat"),
+                        &stats,
+                        path_converter,
+                        width,
+                        options,
+                    )?;
                 }
                 DiffFormat::Types => {
                     let tree_diff = diff_stream();
@@ -1101,13 +1109,19 @@ fn show_color_words_diff_lines(
     let word_diff_hunks = ContentDiff::by_word(contents.into_array())
         .hunks()
         .collect_vec();
-    let can_inline = match options.max_inline_alternation {
-        None => true,     // unlimited
-        Some(0) => false, // no need to count alternation
-        Some(max_num) => {
-            let groups = split_diff_hunks_by_matching_newline(&word_diff_hunks);
-            groups.map(count_diff_alternation).max().unwrap_or(0) <= max_num
+    let can_inline = if formatter.maybe_color() {
+        match options.max_inline_alternation {
+            None => true,     // unlimited
+            Some(0) => false, // no need to count alternation
+            Some(max_num) => {
+                let groups = split_diff_hunks_by_matching_newline(&word_diff_hunks);
+                groups.map(count_diff_alternation).max().unwrap_or(0) <= max_num
+            }
         }
+    } else {
+        // Inline word hunks rely on color labels to distinguish sides. Without
+        // color support, show separate before/after lines instead.
+        false
     };
     if can_inline {
         let mut diff_line_iter =
@@ -1626,6 +1640,8 @@ pub async fn show_file_by_file_diff(
 pub struct UnifiedDiffOptions {
     /// Number of context lines to show.
     pub context: usize,
+    /// Whether to show the 'a/' and 'b/' path prefixes.
+    pub show_path_prefix: bool,
     /// How lines are tokenized and compared.
     pub line_diff: LineDiffOptions,
 }
@@ -1634,6 +1650,7 @@ impl UnifiedDiffOptions {
     pub fn from_settings(settings: &UserSettings) -> Result<Self, ConfigGetError> {
         Ok(Self {
             context: settings.get("diff.git.context")?,
+            show_path_prefix: settings.get("diff.git.show-path-prefix")?,
             line_diff: LineDiffOptions::default(),
         })
     }
@@ -1722,6 +1739,8 @@ pub async fn show_git_diff(
     while let Some(MaterializedTreeDiffEntry { path, values }) = diff_stream.next().await {
         let left_path = path.source();
         let right_path = path.target();
+        let left_prefix = if options.show_path_prefix { "a/" } else { "" };
+        let right_prefix = if options.show_path_prefix { "b/" } else { "" };
         let left_path_string = left_path.as_internal_file_string();
         let right_path_string = right_path.as_internal_file_string();
         let values = values?;
@@ -1733,7 +1752,7 @@ pub async fn show_git_diff(
             let mut formatter = formatter.labeled("file_header");
             writeln!(
                 formatter,
-                "diff --git a/{left_path_string} b/{right_path_string}"
+                "diff --git {left_prefix}{left_path_string} {right_prefix}{right_path_string}"
             )?;
             let left_hash = &left_part.hash;
             let right_hash = &right_part.hash;
@@ -1775,11 +1794,11 @@ pub async fn show_git_diff(
         }
 
         let left_path = match left_part.mode {
-            Some(_) => format!("a/{left_path_string}"),
+            Some(_) => format!("{left_prefix}{left_path_string}"),
             None => "/dev/null".to_owned(),
         };
         let right_path = match right_part.mode {
-            Some(_) => format!("b/{right_path_string}"),
+            Some(_) => format!("{right_prefix}{right_path_string}"),
             None => "/dev/null".to_owned(),
         };
         if left_part.content.is_binary || right_part.content.is_binary {
@@ -1880,9 +1899,19 @@ pub fn diff_status(
 pub struct DiffStatOptions {
     /// How lines are tokenized and compared.
     pub line_diff: LineDiffOptions,
+    /// How many characters to use at most, for the bar portion.
+    /// If None, there is no width limit.
+    pub max_bar_width: Option<usize>,
 }
 
 impl DiffStatOptions {
+    pub fn from_settings(settings: &UserSettings) -> Result<Self, ConfigGetError> {
+        Ok(Self {
+            line_diff: LineDiffOptions::default(),
+            max_bar_width: settings.get("diff.stat.max-bar-width").optional()?,
+        })
+    }
+
     fn merge_args(&mut self, args: &DiffFormatArgs) {
         self.line_diff.merge_args(args);
     }
@@ -2037,7 +2066,8 @@ pub fn show_diff_stats(
     formatter: &mut dyn Formatter,
     stats: &DiffStats,
     path_converter: &RepoPathUiConverter,
-    display_width: usize,
+    total_display_width: usize,
+    options: &DiffStatOptions,
 ) -> io::Result<()> {
     let ui_paths = stats
         .entries()
@@ -2062,7 +2092,7 @@ pub fn show_diff_stats(
 
     // Fit to the available display width, but always assume at least a tiny bit of
     // room.
-    let available_width = max(display_width.saturating_sub(" | ".len()), 8);
+    let available_width = max(total_display_width.saturating_sub(" | ".len()), 8);
 
     // Measure the widest right side for line diffs and reduce max_path_width if
     // needed.
@@ -2101,8 +2131,13 @@ pub fn show_diff_stats(
 
     // Now that we've chosen the path width, use the rest of the space for the ++--
     // bar.
-    let max_bar_width =
+
+    let mut max_bar_width =
         available_width.saturating_sub(max_path_width + diff_number_width + " ".len());
+    if let Some(bar_width) = options.max_bar_width {
+        max_bar_width = min(max_bar_width, bar_width);
+    }
+
     let factor = match max_diffs {
         Some(max) if max > max_bar_width => max_bar_width as f64 / max as f64,
         _ => 1.0,

@@ -24,6 +24,10 @@ use crate::common::create_commit_with_files;
 use crate::common::fake_diff_editor_path;
 use crate::common::to_toml_value;
 
+fn strip_ansi_escape_codes(output: String) -> String {
+    anstream::adapter::strip_str(&output).to_string()
+}
+
 #[test]
 fn test_diff_basic() {
     let test_env = TestEnvironment::default();
@@ -42,7 +46,8 @@ fn test_diff_basic() {
     insta::assert_snapshot!(output, @"
     Modified regular file file2:
        1    1: 1
-       2    2: 25
+       2     : 2
+            2: 5
        3    3: 3
        4     : 4
     Modified regular file file3 (file1 => file3):
@@ -54,7 +59,8 @@ fn test_diff_basic() {
     insta::assert_snapshot!(output, @"
     Modified regular file file2:
        1    1: 1
-       2    2: 25
+       2     : 2
+            2: 5
        3    3: 3
        4     : 4
     Modified regular file file3 (file1 => file3):
@@ -204,6 +210,27 @@ fn test_diff_basic() {
     [EOF]
     ");
 
+    let output = work_dir.run_jj(["diff", "--git", "--config=diff.git.show-path-prefix=false"]);
+    insta::assert_snapshot!(output, @"
+    diff --git file2 file2
+    index 94ebaf9001..1ffc51b472 100644
+    --- file2
+    +++ file2
+    @@ -1,4 +1,3 @@
+     1
+    -2
+    +5
+     3
+    -4
+    diff --git file1 file3
+    rename from file1
+    rename to file3
+    diff --git file2 file4
+    copy from file2
+    copy to file4
+    [EOF]
+    ");
+
     let output = work_dir.run_jj(["diff", "--stat"]);
     insta::assert_snapshot!(output, @"
     file2            | 3 +--
@@ -283,7 +310,8 @@ fn test_diff_basic() {
     M file2
     Modified regular file file2:
        1    1: 1
-       2    2: 25
+       2     : 2
+            2: 5
        3    3: 3
        4     : 4
     [EOF]
@@ -464,7 +492,8 @@ fn test_diff_file_mode() {
             1: 2
     Executable file became non-executable at file2:
     Non-executable file became executable at file3:
-       1    1: 12
+       1     : 1
+            1: 2
     Non-executable file became executable at file4:
     [EOF]
     ");
@@ -760,25 +789,33 @@ fn test_diff_relative_paths() {
     #[cfg(unix)]
     insta::assert_snapshot!(output, @"
     Modified regular file file2:
-       1    1: foo2bar2
+       1     : foo2
+            1: bar2
     Modified regular file subdir1/file3:
-       1    1: foo3bar3
+       1     : foo3
+            1: bar3
     Modified regular file ../dir2/file4:
-       1    1: foo4bar4
+       1     : foo4
+            1: bar4
     Modified regular file ../file1:
-       1    1: foo1bar1
+       1     : foo1
+            1: bar1
     [EOF]
     ");
     #[cfg(windows)]
     insta::assert_snapshot!(output, @r"
     Modified regular file file2:
-       1    1: foo2bar2
+       1     : foo2
+            1: bar2
     Modified regular file subdir1\file3:
-       1    1: foo3bar3
+       1     : foo3
+            1: bar3
     Modified regular file ..\dir2\file4:
-       1    1: foo4bar4
+       1     : foo4
+            1: bar4
     Modified regular file ..\file1:
-       1    1: foo1bar1
+       1     : foo1
+            1: bar1
     [EOF]
     ");
 
@@ -896,8 +933,9 @@ fn test_diff_hunks() {
        1     : foo
     Modified regular file file3:
        1    1: foo
+       2     : baz qux blah blah
             2: bar
-       2    3: baz quxquux blah blah
+            3: baz quux blah blah
     [EOF]
     ");
 
@@ -976,6 +1014,10 @@ fn test_diff_color_words_inlining_threshold() {
     let render_diff = |max_alternation: i32, args: &[&str]| {
         let config = format!("diff.color-words.max-inline-alternation={max_alternation}");
         work_dir.run_jj_with(|cmd| cmd.args(["diff", "--config", &config]).args(args))
+    };
+    let render_color_diff = |max_alternation| {
+        render_diff(max_alternation, &["--color=always"])
+            .normalize_stdout_with(strip_ansi_escape_codes)
     };
 
     let file1_path = "file1-single-line";
@@ -1076,7 +1118,9 @@ fn test_diff_color_words_inlining_threshold() {
     );
 
     // default
-    let output = work_dir.run_jj(["diff"]);
+    let output = work_dir
+        .run_jj(["diff", "--color=always"])
+        .normalize_stdout_with(strip_ansi_escape_codes);
     insta::assert_snapshot!(output, @"
     Modified regular file file1-single-line:
        1    1: == adds ==
@@ -1124,7 +1168,7 @@ fn test_diff_color_words_inlining_threshold() {
     ");
 
     // -1: inline all
-    insta::assert_snapshot!(render_diff(-1, &[]), @"
+    insta::assert_snapshot!(render_color_diff(-1), @"
     Modified regular file file1-single-line:
        1    1: == adds ==
        2    2: a X b Y Z c
@@ -1167,7 +1211,7 @@ fn test_diff_color_words_inlining_threshold() {
     ");
 
     // 0: no inlining
-    insta::assert_snapshot!(render_diff(0, &[]), @"
+    insta::assert_snapshot!(render_color_diff(0), @"
     Modified regular file file1-single-line:
        1    1: == adds ==
        2     : a b c
@@ -1225,7 +1269,7 @@ fn test_diff_color_words_inlining_threshold() {
     ");
 
     // 1: inline adds-only or removes-only lines
-    insta::assert_snapshot!(render_diff(1, &[]), @"
+    insta::assert_snapshot!(render_color_diff(1), @"
     Modified regular file file1-single-line:
        1    1: == adds ==
        2    2: a X b Y Z c
@@ -1279,7 +1323,7 @@ fn test_diff_color_words_inlining_threshold() {
     ");
 
     // 2: inline up to adds + removes lines
-    insta::assert_snapshot!(render_diff(2, &[]), @"
+    insta::assert_snapshot!(render_color_diff(2), @"
     Modified regular file file1-single-line:
        1    1: == adds ==
        2    2: a X b Y Z c
@@ -1328,7 +1372,7 @@ fn test_diff_color_words_inlining_threshold() {
     ");
 
     // 3: inline up to adds + removes + adds lines
-    insta::assert_snapshot!(render_diff(3, &[]), @"
+    insta::assert_snapshot!(render_color_diff(3), @"
     Modified regular file file1-single-line:
        1    1: == adds ==
        2    2: a X b Y Z c
@@ -1375,7 +1419,7 @@ fn test_diff_color_words_inlining_threshold() {
     ");
 
     // 4: inline up to adds + removes + adds + removes lines
-    insta::assert_snapshot!(render_diff(4, &[]), @"
+    insta::assert_snapshot!(render_color_diff(4), @"
     Modified regular file file1-single-line:
        1    1: == adds ==
        2    2: a X b Y Z c
@@ -1575,7 +1619,9 @@ fn test_diff_color_words_omit_blank_right_line() {
         "},
     );
 
-    let output = work_dir.run_jj(["diff"]);
+    let output = work_dir
+        .run_jj(["diff", "--color=always"])
+        .normalize_stdout_with(strip_ansi_escape_codes);
     insta::assert_snapshot!(output, @"
     Modified regular file file1:
        1    1: a x
@@ -1610,11 +1656,13 @@ fn test_diff_missing_newline() {
     let output = work_dir.run_jj(["diff"]);
     insta::assert_snapshot!(output, @"
     Modified regular file file1:
-       1    1: foo
+       1     : foo
+            1: foo
             2: bar
     Modified regular file file2:
-       1    1: foo
+       1     : foo
        2     : bar
+            1: foo
     [EOF]
     ");
 
@@ -1687,13 +1735,16 @@ fn test_color_words_diff_missing_newline() {
     work_dir.write_file("file1", "");
     work_dir.run_jj(["commit", "-m", "=== Empty"]).success();
 
-    let output = work_dir.run_jj([
-        "log",
-        "-Tdescription",
-        "-pr::@-",
-        "--no-graph",
-        "--reversed",
-    ]);
+    let output = work_dir
+        .run_jj([
+            "log",
+            "-Tdescription",
+            "-pr::@-",
+            "--no-graph",
+            "--reversed",
+            "--color=always",
+        ])
+        .normalize_stdout_with(strip_ansi_escape_codes);
     insta::assert_snapshot!(output, @"
     === Empty
     Added regular file file1:
@@ -1762,14 +1813,17 @@ fn test_color_words_diff_missing_newline() {
     [EOF]
     ");
 
-    let output = work_dir.run_jj([
-        "log",
-        "--config=diff.color-words.max-inline-alternation=0",
-        "-Tdescription",
-        "-pr::@-",
-        "--no-graph",
-        "--reversed",
-    ]);
+    let output = work_dir
+        .run_jj([
+            "log",
+            "--config=diff.color-words.max-inline-alternation=0",
+            "-Tdescription",
+            "-pr::@-",
+            "--no-graph",
+            "--reversed",
+            "--color=always",
+        ])
+        .normalize_stdout_with(strip_ansi_escape_codes);
     insta::assert_snapshot!(output, @"
     === Empty
     Added regular file file1:
@@ -2034,7 +2088,8 @@ fn test_diff_skipped_context() {
            10: j
     === Must skip 2 lines
     Modified regular file file1:
-       1    1: aA
+       1     : a
+            1: A
        2    2: b
        3    3: c
        4    4: d
@@ -2042,10 +2097,12 @@ fn test_diff_skipped_context() {
        7    7: g
        8    8: h
        9    9: i
-      10   10: jJ
+      10     : j
+           10: J
     === Don't skip 1 line
     Modified regular file file1:
-       1    1: aA
+       1     : a
+            1: A
        2    2: b
        3    3: c
        4    4: d
@@ -2053,31 +2110,36 @@ fn test_diff_skipped_context() {
        6    6: f
        7    7: g
        8    8: h
-       9    9: iI
+       9     : i
+            9: I
       10   10: j
     === No gap to skip
     Modified regular file file1:
        1    1: a
-       2    2: bB
+       2     : b
+            2: B
        3    3: c
        4    4: d
        5    5: e
        6    6: f
        7    7: g
        8    8: h
-       9    9: iI
+       9     : i
+            9: I
       10   10: j
     === No gap to skip
     Modified regular file file1:
        1    1: a
        2    2: b
-       3    3: cC
+       3     : c
+            3: C
        4    4: d
        5    5: e
        6    6: f
        7    7: g
        8    8: h
-       9    9: iI
+       9     : i
+            9: I
       10   10: j
     === 1 line at start
     Modified regular file file1:
@@ -2085,7 +2147,8 @@ fn test_diff_skipped_context() {
        2    2: b
        3    3: c
        4    4: d
-       5    5: eE
+       5     : e
+            5: E
        6    6: f
        7    7: g
        8    8: h
@@ -2096,7 +2159,8 @@ fn test_diff_skipped_context() {
        3    3: c
        4    4: d
        5    5: e
-       6    6: fF
+       6     : f
+            6: F
        7    7: g
        8    8: h
        9    9: i
@@ -2128,7 +2192,16 @@ context = 0
         .success();
     work_dir.write_file("file1", "a\nb\nC\nd\ne");
 
-    let output = work_dir.run_jj(["log", "-Tdescription", "-p", "--no-graph", "--reversed"]);
+    let output = work_dir
+        .run_jj([
+            "log",
+            "-Tdescription",
+            "-p",
+            "--no-graph",
+            "--reversed",
+            "--color=always",
+        ])
+        .normalize_stdout_with(strip_ansi_escape_codes);
     insta::assert_snapshot!(output, @"
     === First commit
     Added regular file file1:
@@ -2252,30 +2325,38 @@ fn test_diff_skipped_context_nondefault() {
             4: d
     === Must skip 2 lines
     Modified regular file file1:
-       1    1: aA
+       1     : a
+            1: A
         ...
-       4    4: dD
+       4     : d
+            4: D
     === Don't skip 1 line
     Modified regular file file1:
-       1    1: aA
+       1     : a
+            1: A
        2    2: b
-       3    3: cC
+       3     : c
+            3: C
        4    4: d
     === No gap to skip
     Modified regular file file1:
        1    1: a
-       2    2: bB
-       3    3: cC
+       2     : b
+       3     : c
+            2: B
+            3: C
        4    4: d
     === 1 line at start
     Modified regular file file1:
        1    1: a
-       2    2: bB
+       2     : b
+            2: B
         ...
     === 1 line at end
     Modified regular file file1:
         ...
-       3    3: cC
+       3     : c
+            3: C
        4    4: d
     [EOF]
     ");
@@ -3086,9 +3167,9 @@ fn test_diff_external_tool() -> TestResult {
         settings
     };
     insta_portable_exit_status.bind(|| {
-        insta::assert_snapshot!(output, @"
+        insta::assert_snapshot!(output, @r"
         ------- stderr -------
-        Warning: Tool exited with <exit status>: 1 (run with --debug to see the exact invocation)
+        Warning: Tool exited with <exit status>: 1 (run with --debug to see the exact invocation).
         [EOF]
         ");
     });
@@ -3218,7 +3299,7 @@ fn test_diff_external_tool() -> TestResult {
     // Non-zero exit code isn't an error
     std::fs::write(&edit_script, "print diff\0fail")?;
     let output = work_dir.run_jj(["show", "--tool=fake-diff-editor"]);
-    insta::assert_snapshot!(output.normalize_stderr_exit_status(), @"
+    insta::assert_snapshot!(output.normalize_stderr_exit_status(), @r"
     Commit ID: b1e84e171e795eeb9cea971f052a30a21255a0a5
     Change ID: rlvkpnrzqnoowoytxnquwvuryrwnrmlp
     Author   : Test User <test.user@example.com> (2001-02-03 08:05:09)
@@ -3229,7 +3310,7 @@ fn test_diff_external_tool() -> TestResult {
     diff
     [EOF]
     ------- stderr -------
-    Warning: Tool exited with exit status: 1 (run with --debug to see the exact invocation)
+    Warning: Tool exited with exit status: 1 (run with --debug to see the exact invocation).
     [EOF]
     ");
 
@@ -4005,6 +4086,100 @@ fn test_diff_revisions() {
     insta::assert_snapshot!(diff_revisions("B|C"), @"
     B
     C
+    [EOF]
+    ");
+}
+
+#[test]
+fn test_diff_rename_in_merge_commit() {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    // A rename in a merge commit is detected once per parent. When the renamed
+    // source is present in more than one parent, the same copy record is reported
+    // for each, and those duplicates must not cancel each other out and drop the
+    // rename. https://github.com/jj-vcs/jj/issues/9752
+    work_dir.write_file("a.txt", "aaa\n");
+    work_dir.run_jj(["describe", "-m", "base"]).success();
+    work_dir.run_jj(["new", "-m", "first branch"]).success();
+    work_dir
+        .run_jj(["new", "@-", "-m", "second branch"])
+        .success();
+    // Merge both children of "base" (@-+); each holds a.txt, so the rename is
+    // detected against both parents.
+    work_dir.run_jj(["new", "@-+", "-m", "merge"]).success();
+    work_dir.remove_file("a.txt");
+    work_dir.write_file("b.txt", "aaa\n");
+
+    let output = work_dir.run_jj(["diff", "-s"]);
+    insta::assert_snapshot!(output, @"
+    R {a.txt => b.txt}
+    [EOF]
+    ");
+}
+
+#[test]
+fn test_diff_stat_max_bar_width() {
+    let test_env = TestEnvironment::default();
+    test_env.add_config(
+        r#"
+    [diff.stat]
+    max-bar-width = 10
+    "#,
+    );
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    // A file adding 50 lines should occupy
+    // all 10 characters of the max bar width
+    let mut file_contents: String = "\n".repeat(50);
+    work_dir.write_file("file", file_contents);
+    let output = work_dir.run_jj(["diff", "--stat"]);
+    insta::assert_snapshot!(output, @"
+    file | 50 ++++++++++
+    1 file changed, 50 insertions(+), 0 deletions(-)
+    [EOF]
+    ");
+    work_dir.run_jj(["new"]).success();
+    // Modify the last 25 lines for a total of 50 removed+added lines.
+    // (Modified lines are interpreted as removing and then adding a line.)
+    // the diff stat should be half + and half -
+    file_contents = "\n".repeat(25);
+    file_contents.push_str(&"A\n".repeat(25));
+    // There is a second file which takes up 20% of the space by lines changed
+    let file2_contents: String = "\n".repeat(10);
+    work_dir.write_file("file", file_contents);
+    work_dir.write_file("file2", file2_contents);
+    let output = work_dir.run_jj(["diff", "--stat"]);
+    insta::assert_snapshot!(output, @"
+    file  | 50 +++++-----
+    file2 | 10 ++
+    2 files changed, 35 insertions(+), 25 deletions(-)
+    [EOF]
+    ");
+
+    // Setting the max-bar-width higher than the column space shouldn't overflow
+    let output = work_dir.run_jj_with(|cmd| {
+        cmd.args(["diff", "--stat", "--config=diff.stat.max-bar-width=100"])
+            .env("COLUMNS", "30")
+    });
+    insta::assert_snapshot!(output, @"
+    file  | 50 +++++++++----------
+    file2 | 10 +++
+    2 files changed, 35 insertions(+), 25 deletions(-)
+    [EOF]
+    ");
+
+    // Setting max-bar-width=0 should not crash. The current implementation
+    // cannot reduce the max width below 2. Currently, setting max-bar-width=0
+    // with the following test writes '++' instead of '+-'.
+    let output = work_dir
+        .run_jj_with(|cmd| cmd.args(["diff", "--stat", "--config=diff.stat.max-bar-width=0"]));
+    insta::assert_snapshot!(output, @"
+    file  | 50 ++
+    file2 | 10 +
+    2 files changed, 35 insertions(+), 25 deletions(-)
     [EOF]
     ");
 }

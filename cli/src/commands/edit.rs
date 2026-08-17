@@ -50,7 +50,7 @@ pub(crate) async fn cmd_edit(
     command: &CommandHelper,
     args: &EditArgs,
 ) -> Result<(), CommandError> {
-    let mut workspace_command = command.workspace_helper(ui)?;
+    let mut workspace_command = command.workspace_helper(ui).await?;
     let revision_arg = args
         .revision_pos
         .as_ref()
@@ -63,7 +63,7 @@ pub(crate) async fn cmd_edit(
         .check_rewritable([new_commit.id()])
         .await?;
     if workspace_command.get_wc_commit_id() == Some(new_commit.id()) {
-        writeln!(ui.status(), "Already editing that commit")?;
+        writeln!(ui.status(), "Already editing that commit.")?;
     } else {
         let mut tx = workspace_command.start_transaction();
         tx.edit(&new_commit)?;

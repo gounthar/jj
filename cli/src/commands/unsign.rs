@@ -48,7 +48,7 @@ pub async fn cmd_unsign(
     command: &CommandHelper,
     args: &UnsignArgs,
 ) -> Result<(), CommandError> {
-    let mut workspace_command = command.workspace_helper(ui)?;
+    let mut workspace_command = command.workspace_helper(ui).await?;
 
     let target_expr = workspace_command
         .parse_union_revsets(ui, &args.revisions)?
@@ -114,12 +114,12 @@ pub async fn cmd_unsign(
     if num_not_authored_by_me > 0 {
         writeln!(
             ui.warning_default(),
-            "{num_not_authored_by_me} of these commits are not authored by you",
+            "{num_not_authored_by_me} of these commits are not authored by you.",
         )?;
     }
 
     if num_reparented > 0 {
-        writeln!(ui.status(), "Rebased {num_reparented} descendant commits")?;
+        writeln!(ui.status(), "Rebased {num_reparented} descendant commits.")?;
     }
 
     let transaction_description = match &*unsigned_commits {

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::slice;
+
 use assert_matches::assert_matches;
 use itertools::Itertools as _;
 use jj_lib::backend::ChangeId;
@@ -29,15 +31,18 @@ use jj_lib::ref_name::RemoteRefSymbol;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::Repo as _;
+use jj_lib::revset::RevsetExpression;
 use jj_lib::rewrite::CommitRewriter;
 use jj_lib::rewrite::CommitWithSelection;
 use jj_lib::rewrite::EmptyBehavior;
 use jj_lib::rewrite::MoveCommitsTarget;
 use jj_lib::rewrite::RebaseOptions;
+use jj_lib::rewrite::RebasedCommit;
 use jj_lib::rewrite::RewriteRefsOptions;
 use jj_lib::rewrite::find_duplicate_divergent_commits;
 use jj_lib::rewrite::find_recursive_merge_commits;
 use jj_lib::rewrite::merge_commit_trees;
+use jj_lib::rewrite::merge_commit_trees_no_resolve;
 use jj_lib::rewrite::rebase_commit_with_options;
 use jj_lib::rewrite::restore_tree;
 use maplit::hashmap;
@@ -91,22 +96,39 @@ fn test_merge_criss_cross() -> TestResult {
             .set_description(description)
             .write_unwrap()
     };
-    let commit_a = make_commit("A", vec![repo.store().root_commit_id().clone()], tree_a);
-    let commit_b = make_commit("B", vec![commit_a.id().clone()], tree_b);
-    let commit_c = make_commit("C", vec![commit_a.id().clone()], tree_c);
+    let commit_a = make_commit(
+        "A",
+        vec![repo.store().root_commit_id().clone()],
+        tree_a.clone(),
+    );
+    let commit_b = make_commit("B", vec![commit_a.id().clone()], tree_b.clone());
+    let commit_c = make_commit("C", vec![commit_a.id().clone()], tree_c.clone());
     let commit_d = make_commit(
         "D",
         vec![commit_b.id().clone(), commit_c.id().clone()],
-        tree_d,
+        tree_d.clone(),
     );
     let commit_e = make_commit(
         "E",
         vec![commit_b.id().clone(), commit_c.id().clone()],
-        tree_e,
+        tree_e.clone(),
     );
-    let merged = merge_commit_trees(tx.repo_mut(), &[commit_d, commit_e]).block_on()?;
-
+    let merged =
+        merge_commit_trees(tx.repo_mut(), &[commit_d.clone(), commit_e.clone()]).block_on()?;
     assert_tree_eq!(merged, tree_expected);
+
+    let tree_unresolved_expected = MergedTree::merge_no_resolve(Merge::from_vec(vec![
+        (tree_d, commit_d.conflict_label()),
+        (tree_b, commit_b.conflict_label()),
+        (tree_a, commit_a.conflict_label()),
+        (tree_c, commit_c.conflict_label()),
+        (tree_e, commit_e.conflict_label()),
+    ]));
+    let unresolved_merged =
+        merge_commit_trees_no_resolve(tx.repo_mut(), &[commit_d, commit_e]).block_on()?;
+    assert_tree_eq!(unresolved_merged, tree_unresolved_expected);
+    assert_tree_eq!(unresolved_merged.resolve().block_on()?, tree_expected);
+
     Ok(())
 }
 
@@ -115,19 +137,31 @@ fn test_find_recursive_merge_commits() -> TestResult {
     let test_repo = TestRepo::init();
     let repo = &test_repo.repo;
 
+    // G H I
+    // |X|X|
+    // D E F
+    // |X|/
+    // B C
+    // |/
+    // A
     let mut tx = repo.start_transaction();
     let commit_a = write_random_commit(tx.repo_mut());
     let commit_b = write_random_commit_with_parents(tx.repo_mut(), &[&commit_a]);
     let commit_c = write_random_commit_with_parents(tx.repo_mut(), &[&commit_a]);
     let commit_d = write_random_commit_with_parents(tx.repo_mut(), &[&commit_b, &commit_c]);
     let commit_e = write_random_commit_with_parents(tx.repo_mut(), &[&commit_b, &commit_c]);
+    let commit_f = write_random_commit_with_parents(tx.repo_mut(), &[&commit_c]);
+    let commit_g = write_random_commit_with_parents(tx.repo_mut(), &[&commit_d, &commit_e]);
+    let commit_h =
+        write_random_commit_with_parents(tx.repo_mut(), &[&commit_d, &commit_e, &commit_f]);
+    let commit_i = write_random_commit_with_parents(tx.repo_mut(), &[&commit_e, &commit_f]);
 
     let commit_id_merge = find_recursive_merge_commits(
         tx.repo().store(),
         tx.repo().index(),
         vec![commit_d.id().clone(), commit_e.id().clone()],
-    )?;
-
+    )
+    .block_on()?;
     assert_eq!(
         commit_id_merge,
         Merge::from_vec(vec![
@@ -138,6 +172,34 @@ fn test_find_recursive_merge_commits() -> TestResult {
             commit_e.id().clone(),
         ])
     );
+
+    let commit_id_merge = find_recursive_merge_commits(
+        tx.repo().store(),
+        tx.repo().index(),
+        vec![
+            commit_g.id().clone(),
+            commit_h.id().clone(),
+            commit_i.id().clone(),
+        ],
+    )
+    .block_on()?;
+    assert_eq!(
+        commit_id_merge,
+        Merge::from_vec(vec![
+            commit_g.id().clone(),
+            commit_a.id().clone(),
+            commit_b.id().clone(),
+            commit_d.id().clone(),
+            commit_c.id().clone(),
+            commit_e.id().clone(),
+            commit_h.id().clone(),
+            commit_e.id().clone(),
+            commit_c.id().clone(),
+            commit_f.id().clone(),
+            commit_i.id().clone(),
+        ])
+    );
+
     Ok(())
 }
 
@@ -1194,6 +1256,62 @@ fn test_rebase_descendants_hidden() -> TestResult {
 }
 
 #[test]
+fn test_rebase_descendants_some_excluded() -> TestResult {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+
+    // Commits A and B are immutable. A is rewritten explicitly. B shouldn't be
+    // rebased because it's immutable. C isn't rebased because of that. D should
+    // be rebased.
+    //
+    // C
+    // |
+    // B D
+    // |/
+    // A
+    let mut tx = repo.start_transaction();
+    let commit_a = write_random_commit(tx.repo_mut());
+    let commit_b = write_random_commit_with_parents(tx.repo_mut(), &[&commit_a]);
+    let commit_c = write_random_commit_with_parents(tx.repo_mut(), &[&commit_b]);
+    let commit_d = write_random_commit_with_parents(tx.repo_mut(), &[&commit_a]);
+    let repo = tx.commit("test").block_on()?;
+
+    let mut tx = repo.start_transaction();
+    let commit_a2 = tx
+        .repo_mut()
+        .rewrite_commit(&commit_a)
+        .set_description("a2")
+        .write()
+        .block_on()?;
+    let immutable = RevsetExpression::commit(commit_b.id().clone()).ancestors();
+    let options = RebaseOptions::default();
+    let mut rebased_commits = Vec::new();
+    tx.repo_mut()
+        .rebase_descendants_with_options(
+            &immutable,
+            &options,
+            |old_commit, rebased| match rebased {
+                RebasedCommit::Rewritten(commit) => rebased_commits.push((old_commit, commit)),
+                RebasedCommit::Abandoned { .. } => panic!("no commit should be abandoned"),
+            },
+        )
+        .block_on()?;
+    assert_eq!(rebased_commits.len(), 1);
+    assert_eq!(rebased_commits[0].0, commit_d);
+    let (_, commit_d2) = rebased_commits[0].clone();
+    assert_eq!(commit_d2.parent_ids(), slice::from_ref(commit_a2.id()));
+    assert_eq!(
+        *tx.repo().view().heads(),
+        hashset! {
+            commit_c.id().clone(),
+            commit_d2.id().clone(),
+        }
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_rebase_descendants_repeated() {
     let test_repo = TestRepo::init();
     let repo = &test_repo.repo;
@@ -1346,7 +1464,7 @@ fn test_rebase_descendants_basic_bookmark_update() -> TestResult {
     tx.repo_mut().rebase_descendants().block_on()?;
     assert_eq!(
         tx.repo().get_local_bookmark("main".as_ref()),
-        RefTarget::normal(commit_b2.id().clone())
+        &RefTarget::normal(commit_b2.id().clone())
     );
 
     assert_eq!(*tx.repo().view().heads(), hashset! {commit_b2.id().clone()});
@@ -1396,7 +1514,7 @@ fn test_rebase_descendants_bookmark_move_two_steps() -> TestResult {
     assert_eq!(commit_c3.parent_ids(), vec![commit_b2.id().clone()]);
     assert_eq!(
         tx.repo().get_local_bookmark("main".as_ref()),
-        RefTarget::normal(commit_c3.id().clone())
+        &RefTarget::normal(commit_c3.id().clone())
     );
     Ok(())
 }
@@ -1434,17 +1552,17 @@ fn test_rebase_descendants_basic_bookmark_update_with_non_local_bookmark() -> Te
     tx.repo_mut().rebase_descendants().block_on()?;
     assert_eq!(
         tx.repo().get_local_bookmark("main".as_ref()),
-        RefTarget::normal(commit_b2.id().clone())
+        &RefTarget::normal(commit_b2.id().clone())
     );
     // The remote bookmark and tag should not get updated
     assert_eq!(
         tx.repo()
             .get_remote_bookmark(remote_symbol("main", "origin")),
-        commit_b_remote_ref
+        &commit_b_remote_ref
     );
     assert_eq!(
         tx.repo().get_local_tag("v1".as_ref()),
-        RefTarget::normal(commit_b.id().clone())
+        &RefTarget::normal(commit_b.id().clone())
     );
 
     // Commit B is no longer visible even though the remote bookmark points to it.
@@ -1495,7 +1613,7 @@ fn test_rebase_descendants_update_bookmark_after_abandon(
     };
     let rebase_map = rebase_descendants_with_options_return_map(tx.repo_mut(), &options);
     assert_eq!(
-        tx.repo().get_local_bookmark("main".as_ref()),
+        *tx.repo().get_local_bookmark("main".as_ref()),
         if delete_abandoned_bookmarks {
             RefTarget::absent()
         } else {
@@ -1510,7 +1628,7 @@ fn test_rebase_descendants_update_bookmark_after_abandon(
     );
     assert_eq!(
         tx.repo().get_local_bookmark("other".as_ref()),
-        RefTarget::normal(rebase_map[commit_c.id()].clone())
+        &RefTarget::normal(rebase_map[commit_c.id()].clone())
     );
 
     assert_eq!(
@@ -1723,7 +1841,7 @@ fn test_rebase_descendants_rewrite_resolves_bookmark_conflict() -> TestResult {
     tx.repo_mut().rebase_descendants().block_on()?;
     assert_eq!(
         tx.repo().get_local_bookmark("main".as_ref()),
-        RefTarget::normal(commit_b2.id().clone())
+        &RefTarget::normal(commit_b2.id().clone())
     );
 
     assert_eq!(
@@ -1771,7 +1889,7 @@ fn test_rebase_descendants_bookmark_delete_modify_abandon(
     let _rebase_map = rebase_descendants_with_options_return_map(tx.repo_mut(), &options);
     assert_eq!(
         tx.repo().get_local_bookmark("main".as_ref()),
-        RefTarget::absent()
+        RefTarget::absent_ref()
     );
     Ok(())
 }
@@ -1816,7 +1934,7 @@ fn test_rebase_descendants_bookmark_move_forward_abandon(
     };
     let _rebase_map = rebase_descendants_with_options_return_map(tx.repo_mut(), &options);
     assert_eq!(
-        tx.repo().get_local_bookmark("main".as_ref()),
+        *tx.repo().get_local_bookmark("main".as_ref()),
         if delete_abandoned_bookmarks {
             RefTarget::from_merge(Merge::from_vec(vec![
                 None,
@@ -1870,7 +1988,7 @@ fn test_rebase_descendants_bookmark_move_sideways_abandon(
     };
     let _rebase_map = rebase_descendants_with_options_return_map(tx.repo_mut(), &options);
     assert_eq!(
-        tx.repo().get_local_bookmark("main".as_ref()),
+        *tx.repo().get_local_bookmark("main".as_ref()),
         if delete_abandoned_bookmarks {
             RefTarget::from_merge(Merge::from_vec(vec![
                 None,

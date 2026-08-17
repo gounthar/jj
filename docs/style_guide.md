@@ -26,11 +26,42 @@ correctly (we have tests in `jj-lib` for that), but they should check that the
 
 Use end-to-end tests for testing the CLI commands themselves.
 
+## Logging messages
+
+When messages are logged, such as with `writeln!(ui.status(), "Message...")?;`,
+prefer to end the message with a period as if it were a full sentence. For
+example:
+
+```rust
+// CORRECT:
+writeln!(ui.status(), "Rebased {num_rebased} descendant commits.")?;
+// INCORRECT:
+writeln!(ui.status(), "Rebased {num_rebased} descendant commits")?;
+```
+
+There are of course exceptions to this, such as messages that are printing
+interpolated values at the end, or need to print some templated value:
+
+```rust
+// These are fine:
+writeln!(
+    ui.status(),
+    "Operation left uncommitted because --no-integrate-operation was requested: {}",
+    short_operation_hash(self.repo().op_id())
+)?;
+writeln!(ui.warning_default(), "No matching entries for paths: {paths}")?;
+```
+
+Also try not to put periods right after any printed IDs or symbols (such as
+commit IDs), since users may double click to copy the value, which may include
+the period.
+
 ## Documentation comments
 
 ### General
 
-In general, try to follow [`rust-lang/rfcs` 1574]. The important points are:
+In general, try to follow [`rust-lang/rfcs` 1574][rust-lang/rfcs-1574]. The
+important points are:
 
 - Use documentation comments (`///`) on types, functions, and fields.
 
@@ -69,7 +100,31 @@ In general, try to follow [`rust-lang/rfcs` 1574]. The important points are:
   complete sentences. But use your own judgment too; for example a sentence that
   says "Returns blah blah." would be fine.
 
-[`rust-lang/rfcs` 1574]:
+- Prefer Itertools `collect_vec()` and `try_collect()` over annotated
+  `.collect::<Vec<...>>()` calls.
+
+    ```rust
+    // CORRECT:
+
+    let commits = workspace_helper.parse_union_revsets(&revs)
+      .ids()
+      .collect_vec();
+
+    let fallible_commits = commits.iter().map(|c| store.get(c))
+      .try_collect()?;
+    ```
+
+    ```rust
+    // INCORRECT: The annotation is used
+
+    let commits: Vec<_> = workspace_helper.parse_union_revsets(&revs)
+      .ids()
+      .collect();
+
+    let fallible_commits = commits.iter().map(|c| store.get(c))
+      .collect::<Vec<_, CommandError>>()?;
+    ```
+[rust-lang/rfcs-1574]:
   https://github.com/rust-lang/rfcs/blob/master/text/1574-more-api-documentation-conventions.md
 
 ### Subcommand comments
@@ -117,10 +172,14 @@ Specifically for `jj` subcommands:
   documentation page so that all the relevant info can still be accessed via the
   CLI.
   - For example, `jj rebase --help`.
+  - Markdown can be used, but make sure to use at least level 3 headings (`###`
+    or more). The CLI reference page uses level 2 headings for each command
+    (e.g., `## jj root`), so the Table of Contents might break if any command
+    documentation uses level 1 or level 2 headings.
 
-- Default aliases (i.e., those defined in [`misc.toml`]) are not automatically
-  shown by `clap`, since it doesn't know about them. Mention these at the end of
-  the first line for the command in question in the format
+- Default aliases (i.e., those defined in [`misc.toml`][misc.toml]) are not
+  automatically shown by `clap`, since it doesn't know about them. Mention these
+  at the end of the first line for the command in question in the format
   `[default alias: <alias>]`. For example, the first line of `jj describe` is:
 
   ```
@@ -136,7 +195,7 @@ Specifically for `jj` subcommands:
   `test_generate_markdown_docs_in_docs_dir` test to generate
   `cli-reference@.md.snap`.
 
-[`misc.toml`]: ../cli/src/config/misc.toml
+[misc.toml]: https://github.com/jj-vcs/jj/blob/main/cli/src/config/misc.toml
 
 ### Command argument / option comments
 

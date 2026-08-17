@@ -50,7 +50,7 @@ where
 }
 
 fn index_has_id(index: &dyn Index, commit_id: &CommitId) -> bool {
-    index.has_id(commit_id).unwrap()
+    index.has_id(commit_id).block_on().unwrap()
 }
 
 #[test]
@@ -650,17 +650,17 @@ fn test_rename_remote() {
     mut_repo.rename_remote("origin".as_ref(), "upstream".as_ref());
     assert_eq!(
         mut_repo.get_remote_bookmark(remote_symbol("main", "upstream")),
-        remote_ref
+        &remote_ref
     );
     assert_eq!(
         mut_repo.get_remote_bookmark(remote_symbol("main", "origin")),
-        RemoteRef::absent()
+        RemoteRef::absent_ref()
     );
 }
 
 #[test]
 fn test_remove_wc_commit_previous_not_discardable() -> TestResult {
-    // Test that MutableRepo::remove_wc_commit() does not usually abandon the
+    // Test that MutableRepo::remove_workspace() does not usually abandon the
     // previous commit.
     let test_repo = TestRepo::init();
     let repo = &test_repo.repo;
@@ -670,19 +670,21 @@ fn test_remove_wc_commit_previous_not_discardable() -> TestResult {
     let old_wc_commit = write_random_commit(mut_repo);
     let ws_name = WorkspaceName::DEFAULT.to_owned();
     mut_repo.edit(ws_name.clone(), &old_wc_commit).block_on()?;
+    mut_repo.set_git_head_target(&ws_name, RefTarget::normal(old_wc_commit.id().clone()));
     let repo = tx.commit("test").block_on()?;
 
     let mut tx = repo.start_transaction();
     let mut_repo = tx.repo_mut();
-    mut_repo.remove_wc_commit(&ws_name).block_on()?;
+    mut_repo.remove_workspace(&ws_name).block_on()?;
     mut_repo.rebase_descendants().block_on()?;
     assert!(mut_repo.view().heads().contains(old_wc_commit.id()));
+    assert!(mut_repo.view().git_head(&ws_name).is_absent());
     Ok(())
 }
 
 #[test]
 fn test_remove_wc_commit_previous_discardable() -> TestResult {
-    // Test that MutableRepo::remove_wc_commit() abandons the previous commit
+    // Test that MutableRepo::remove_workspace() abandons the previous commit
     // if it was discardable.
     let test_repo = TestRepo::init();
     let repo = &test_repo.repo;
@@ -701,7 +703,7 @@ fn test_remove_wc_commit_previous_discardable() -> TestResult {
 
     let mut tx = repo.start_transaction();
     let mut_repo = tx.repo_mut();
-    mut_repo.remove_wc_commit(&ws_name).block_on()?;
+    mut_repo.remove_workspace(&ws_name).block_on()?;
     mut_repo.rebase_descendants().block_on()?;
     assert!(!mut_repo.view().heads().contains(old_wc_commit.id()));
     Ok(())

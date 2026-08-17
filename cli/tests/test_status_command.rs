@@ -109,12 +109,60 @@ fn test_status_filtered() {
     [EOF]
     ");
 
+    // The diff summary should preserve ANSI color codes instead of sanitizing them.
+    let output = work_dir.run_jj(["status", "file_1", "--color=always"]);
+    insta::assert_snapshot!(output, @"
+    Working copy changes:
+    [38;5;2mA file_1[39m
+    Working copy  (@) : [1m[38;5;13mq[38;5;8mpvuntsm[39m [38;5;12m2[38;5;8mf169edb[39m [38;5;3m(no description set)[0m
+    Parent commit (@-): [1m[38;5;5mz[0m[38;5;8mzzzzzzz[39m [1m[38;5;4m0[0m[38;5;8m0000000[39m [38;5;2m(empty)[39m [38;5;2m(no description set)[39m
+    [EOF]
+    ");
+
     // The output filtered to a non-existent file should display a warning.
     let output = work_dir.run_jj(["status", "nonexistent"]);
     insta::assert_snapshot!(output, @"
-    Working copy changes:
     Working copy  (@) : qpvuntsm 2f169edb (no description set)
     Parent commit (@-): zzzzzzzz 00000000 (empty) (no description set)
+    [EOF]
+    ------- stderr -------
+    Warning: No matching entries for paths: nonexistent
+    [EOF]
+    ");
+
+    // The output filtered to file_1 should not print an empty changes header
+    // when only file_2 changed.
+    work_dir.run_jj(["new"]).success();
+    work_dir.write_file("file_2", "updated");
+
+    let output = work_dir.run_jj(["status", "file_1"]);
+    insta::assert_snapshot!(output, @"
+    Working copy  (@) : mzvwutvl d977fd8e (no description set)
+    Parent commit (@-): qpvuntsm 2f169edb (no description set)
+    [EOF]
+    ");
+
+    // The output filtered to file_1 and a non-existent file should display
+    // only the warning.
+    let output = work_dir.run_jj(["status", "file_1", "nonexistent"]);
+    insta::assert_snapshot!(output, @"
+    Working copy  (@) : mzvwutvl d977fd8e (no description set)
+    Parent commit (@-): qpvuntsm 2f169edb (no description set)
+    [EOF]
+    ------- stderr -------
+    Warning: No matching entries for paths: nonexistent
+    [EOF]
+    ");
+
+    // The output filtered to a non-existent file in a clean working copy should
+    // report no changes and display a warning.
+    work_dir.run_jj(["new"]).success();
+
+    let output = work_dir.run_jj(["status", "nonexistent"]);
+    insta::assert_snapshot!(output, @"
+    The working copy has no changes.
+    Working copy  (@) : vruxwmqv bc1fcb38 (empty) (no description set)
+    Parent commit (@-): mzvwutvl d977fd8e (no description set)
     [EOF]
     ------- stderr -------
     Warning: No matching entries for paths: nonexistent
@@ -189,7 +237,7 @@ fn test_status_conflicted_bookmarks() {
     Hint: Use `jj bookmark list` to see details. Use `jj bookmark set <name> -r <rev>` to resolve.
     Warning: These remote bookmarks have conflicts:
       remote_bookmark@origin
-    Hint: Use `jj bookmark list` to see details. Use `jj git fetch` to resolve.
+    Hint: Use `jj bookmark list` to see details. Resolve by fetching an updated bookmark from the remote.
     [EOF]
     ------- stderr -------
     Concurrent modification detected, resolving automatically.
@@ -396,13 +444,13 @@ fn test_status_display_relevant_working_commit_conflict_hints() {
 
     let output = work_dir.run_jj(["status"]);
 
-    insta::assert_snapshot!(output, @"
+    insta::assert_snapshot!(output, @r"
     Working copy changes:
     M conflicted1.txt
     M conflicted2.txt
     Working copy  (@) : wqnwkozp 4ecf4b33 fixed 1
     Parent commit (@-): yqosqzyt 06b8a9dd (conflict) (empty) boom-cont-2
-    Hint: Conflict in parent commit has been resolved in working copy
+    Hint: Conflict in parent commit has been resolved in working copy.
     [EOF]
     ");
 
@@ -595,14 +643,65 @@ fn test_status_untracked_files() {
 }
 
 #[test]
+fn test_status_filtered_untracked() {
+    let test_env = TestEnvironment::default();
+    test_env.add_config(r#"snapshot.auto-track = "none()""#);
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    work_dir.write_file("file_a", "...");
+    work_dir.write_file("file_b", "...");
+    let dir = work_dir.create_dir("dir");
+    dir.write_file("file_c", "...");
+
+    // Filter to file_a: only file_a shown as untracked
+    let output = work_dir.run_jj(["status", "file_a"]);
+    insta::assert_snapshot!(output, @"
+    Untracked paths:
+    ? file_a
+    Working copy  (@) : qpvuntsm e8849ae1 (empty) (no description set)
+    Parent commit (@-): zzzzzzzz 00000000 (empty) (no description set)
+    [EOF]
+    ------- stderr -------
+    Warning: No matching entries for paths: file_a
+    [EOF]
+    ");
+
+    // Filter to dir: collapsed directory shown
+    let output = work_dir.run_jj(["status", "dir"]);
+    insta::assert_snapshot!(output.normalize_backslash(), @"
+    Untracked paths:
+    ? dir/
+    Working copy  (@) : qpvuntsm e8849ae1 (empty) (no description set)
+    Parent commit (@-): zzzzzzzz 00000000 (empty) (no description set)
+    [EOF]
+    ------- stderr -------
+    Warning: No matching entries for paths: dir
+    [EOF]
+    ");
+
+    // Filter to nonexistent: no matching untracked paths, but unrelated
+    // untracked changes still make the working copy dirty.
+    let output = work_dir.run_jj(["status", "nonexistent"]);
+    insta::assert_snapshot!(output, @"
+    Working copy  (@) : qpvuntsm e8849ae1 (empty) (no description set)
+    Parent commit (@-): zzzzzzzz 00000000 (empty) (no description set)
+    [EOF]
+    ------- stderr -------
+    Warning: No matching entries for paths: nonexistent
+    [EOF]
+    ");
+}
+
+#[test]
 fn test_status_no_working_copy() {
     let test_env = TestEnvironment::default();
     test_env.run_jj_in(".", ["git", "init", "repo"]).success();
     let work_dir = test_env.work_dir("repo");
     work_dir.run_jj(["workspace", "forget"]).success();
 
-    insta::assert_snapshot!(work_dir.run_jj(["status"]), @"
-    No working copy
+    insta::assert_snapshot!(work_dir.run_jj(["status"]), @r"
+    No working copy.
     [EOF]
     ");
 }

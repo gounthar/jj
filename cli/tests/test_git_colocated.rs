@@ -173,6 +173,131 @@ fn test_git_colocated_intent_to_add() -> TestResult {
 }
 
 #[test]
+fn test_git_colocated_new_wc_commit_when_wc_immutable() {
+    let test_env = TestEnvironment::default();
+    test_env
+        .run_jj_in(".", ["git", "init", "--colocate", "repo"])
+        .success();
+    let work_dir = test_env.work_dir("repo");
+
+    // Create Git HEAD commit
+    work_dir.write_file("file1", "a\n");
+    work_dir.run_jj(["new"]).success();
+
+    // Prepare working copy that will become immutable
+    work_dir.write_file("file2", "b\n");
+    work_dir
+        .run_jj(["bookmark", "create", "-r@", "main"])
+        .success();
+    insta::assert_snapshot!(get_colocation_status(&work_dir), @"
+    Workspace is currently colocated with Git.
+    Last imported/exported Git HEAD: eb7b8a1f02b8d0915290e1163a3526bfa4e417fa
+    [EOF]
+    ");
+    insta::assert_snapshot!(get_index_state(work_dir.root()), @"
+    Unconflicted Mode(FILE) 78981922613b ctime=0:0 mtime=0:0 size=0 flags=0 file1
+    Unconflicted Mode(FILE) e69de29bb2d1 ctime=0:0 mtime=0:0 size=0 flags=20004000 file2
+    ");
+
+    // Make the working copy immutable and snapshot changes
+    test_env.add_config(r#"revset-aliases."immutable_heads()" = "main""#);
+    work_dir.write_file("file2", "b\nc\n");
+    work_dir.write_file("file3", "d\n");
+    let output = work_dir.run_jj(["status"]);
+    insta::assert_snapshot!(output, @"
+    Working copy changes:
+    M file2
+    A file3
+    Working copy  (@) : mzvwutvl d1b1d7e9 (no description set)
+    Parent commit (@-): rlvkpnrz 1d3e40a3 main | (no description set)
+    [EOF]
+    ------- stderr -------
+    Warning: The working-copy commit is immutable; a new commit has been created on top of it.
+    [EOF]
+    ");
+    // New working-copy commit is created, and the Git HEAD should be updated
+    let output = work_dir.run_jj(["log", "-r..", "--summary"]);
+    insta::assert_snapshot!(output, @"
+    @  mzvwutvl test.user@example.com 2001-02-03 08:05:11 d1b1d7e9
+    │  (no description set)
+    │  M file2
+    │  A file3
+    ◆  rlvkpnrz test.user@example.com 2001-02-03 08:05:09 main 1d3e40a3
+    │  (no description set)
+    │  A file2
+    ◆  qpvuntsm test.user@example.com 2001-02-03 08:05:08 eb7b8a1f
+    │  (no description set)
+    ~  A file1
+    [EOF]
+    ");
+    insta::assert_snapshot!(get_colocation_status(&work_dir), @"
+    Workspace is currently colocated with Git.
+    Last imported/exported Git HEAD: 1d3e40a35156c275f7a535fdaa50cb5882d500eb
+    [EOF]
+    ");
+    // file3 should be marked as "intent-to-add"
+    insta::assert_snapshot!(get_index_state(work_dir.root()), @"
+    Unconflicted Mode(FILE) 78981922613b ctime=0:0 mtime=0:0 size=0 flags=0 file1
+    Unconflicted Mode(FILE) 61780798228d ctime=0:0 mtime=0:0 size=0 flags=0 file2
+    Unconflicted Mode(FILE) e69de29bb2d1 ctime=0:0 mtime=0:0 size=0 flags=20004000 file3
+    ");
+}
+
+#[test]
+fn test_git_colocated_update_stale_resets_git_head() {
+    let test_env = TestEnvironment::default();
+    test_env
+        .run_jj_in(".", ["git", "init", "--colocate", "repo"])
+        .success();
+    let work_dir = test_env.work_dir("repo");
+
+    // A "parent" commit and a "child" working-copy commit on top
+    work_dir.write_file("file1", "a\n");
+    work_dir.run_jj(["describe", "-m", "parent"]).success();
+    work_dir.run_jj(["new", "-m", "child"]).success();
+    work_dir.write_file("file2", "b\n");
+    work_dir.run_jj(["status"]).success();
+    insta::assert_snapshot!(get_colocation_status(&work_dir), @"
+    Workspace is currently colocated with Git.
+    Last imported/exported Git HEAD: df69548750502d54d6f207b500d25da43ed6fe1e
+    [EOF]
+    ");
+
+    // From another workspace, amend "parent" directly: this rebases "child"
+    // and makes the default (colocated) workspace stale
+    work_dir
+        .run_jj(["workspace", "add", "--name", "second", "../secondary"])
+        .success();
+    let secondary_dir = test_env.work_dir("secondary");
+    secondary_dir
+        .run_jj(["edit", r#"subject(parent)"#])
+        .success();
+    secondary_dir.write_file("file1", "a\nmodified\n");
+    secondary_dir.run_jj(["status"]).success();
+
+    let output = work_dir.run_jj(["workspace", "update-stale"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Working copy  (@) now at: kkmpptxz 422aac81 child
+    Parent commit (@-)      : qpvuntsm 239acdab parent
+    Added 0 files, modified 1 files, removed 0 files
+    Updated working copy to fresh commit 422aac811963
+    [EOF]
+    ");
+
+    // Git HEAD should point to the amended "parent", not the stale one
+    insta::assert_snapshot!(get_colocation_status(&work_dir), @"
+    Workspace is currently colocated with Git.
+    Last imported/exported Git HEAD: 239acdab88e2b438ed43a99471a385d3832190ec
+    [EOF]
+    ");
+    insta::assert_snapshot!(get_index_state(work_dir.root()), @"
+    Unconflicted Mode(FILE) 76b5eb87f1cb ctime=0:0 mtime=0:0 size=0 flags=0 file1
+    Unconflicted Mode(FILE) e69de29bb2d1 ctime=0:0 mtime=0:0 size=0 flags=20004000 file2
+    ");
+}
+
+#[test]
 fn test_git_colocated_unborn_bookmark() -> TestResult {
     let test_env = TestEnvironment::default();
     let work_dir = test_env.work_dir("repo");
@@ -436,14 +561,14 @@ fn test_git_colocated_rebase_on_import() -> TestResult {
         gix::refs::transaction::PreviousValue::Any,
         "update ref",
     )?;
-    insta::assert_snapshot!(get_log_output(&work_dir), @"
+    insta::assert_snapshot!(get_log_output(&work_dir), @r"
     @  d46583362b91d0e172aec469ea1689995540de81
     ○  cbd6c887108743a4abb0919305646a6a914a665e master add a file
     ◆  0000000000000000000000000000000000000000
     [EOF]
     ------- stderr -------
     Abandoned 1 commits that are no longer reachable.
-    Rebased 1 descendant commits off of commits rewritten from git
+    Rebased 1 descendant commits off of commits rewritten from Git.
     Working copy  (@) now at: zsuskuln d4658336 (empty) (no description set)
     Parent commit (@-)      : qpvuntsm cbd6c887 master | add a file
     Added 0 files, modified 1 files, removed 0 files
@@ -632,6 +757,79 @@ fn test_git_colocated_conflicting_git_refs() -> TestResult {
 }
 
 #[test]
+fn test_git_colocated_explicit_import_export() -> TestResult {
+    let test_env = TestEnvironment::default();
+    let work_dir = test_env.work_dir("repo");
+    let git_repo = git::init(work_dir.root());
+    work_dir.run_jj(["git", "init", "--git-repo=."]).success();
+
+    // Create unexportable bookmark
+    work_dir
+        .run_jj(["bookmark", "create", "foo", "-r=root()"])
+        .success();
+    // Create unimportable remote ref
+    let target_id = work_dir
+        .run_jj(["log", "--no-graph", "-T=commit_id", "-r@"])
+        .success()
+        .stdout
+        .into_raw();
+    git_repo.reference(
+        "refs/remotes/git/bar",
+        gix::ObjectId::from_hex(target_id.as_bytes())?,
+        gix::refs::transaction::PreviousValue::Any,
+        "",
+    )?;
+
+    // Import refs during the snapshot by default
+    let output = work_dir.run_jj(["git", "import"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Warning: Failed to import some Git refs:
+      refs/remotes/git/bar
+    Hint: Git remote named 'git' is reserved for local Git repository.
+    Use `jj git remote rename` to give a different name.
+    No import needed in colocated workspaces.
+    [EOF]
+    ");
+
+    // Explicit import also works
+    let output = work_dir.run_jj(["git", "import", "--ignore-working-copy"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Warning: Failed to import some Git refs:
+      refs/remotes/git/bar
+    Hint: Git remote named 'git' is reserved for local Git repository.
+    Use `jj git remote rename` to give a different name.
+    Nothing changed.
+    [EOF]
+    ");
+
+    // Import refs during the snapshot by default, therefore no export
+    let output = work_dir.run_jj(["git", "export"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Warning: Failed to import some Git refs:
+      refs/remotes/git/bar
+    Hint: Git remote named 'git' is reserved for local Git repository.
+    Use `jj git remote rename` to give a different name.
+    No export needed in colocated workspaces.
+    [EOF]
+    ");
+
+    // Explicit export also works
+    let output = work_dir.run_jj(["git", "export", "--ignore-working-copy"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Nothing changed.
+    Warning: Failed to export some bookmarks:
+      foo@git: Ref cannot point to the root commit in Git
+    [EOF]
+    ");
+
+    Ok(())
+}
+
+#[test]
 fn test_git_colocated_checkout_non_empty_working_copy() -> TestResult {
     let test_env = TestEnvironment::default();
     let work_dir = test_env.work_dir("repo");
@@ -735,13 +933,13 @@ fn test_git_colocated_fetch_deleted_or_moved_bookmark() -> TestResult {
         .run_jj(["describe", "C_to_move", "-m", "moved C"])
         .success();
     let output = clone_dir.run_jj(["git", "fetch"]);
-    insta::assert_snapshot!(output, @"
+    insta::assert_snapshot!(output, @r"
     ------- stderr -------
     bookmark: B_to_delete@origin [deleted] untracked
     bookmark: C_to_move@origin   [updated] tracked
-    Abandoned 2 commits that are no longer reachable:
-      royxmykx/1 dd905bab C_to_move@git | (divergent) (empty) original C
+    Abandoned 1 commits that are no longer reachable:
       zsuskuln b2ea51c0 B_to_delete@git | (empty) B_to_delete
+    Updated 1 rewritten commits.
     [EOF]
     ");
     // "original C" and "B_to_delete" are abandoned, as the corresponding bookmarks
@@ -884,6 +1082,32 @@ fn test_git_colocated_external_checkout() -> TestResult {
     [EOF]
     ------- stderr -------
     Reset the working copy parent to the new Git HEAD.
+    [EOF]
+    ");
+
+    // With --no-integrate-operation, the reset operation shouldn't persist
+    work_dir.run_jj(["new", "subject(C)"]).success();
+    git_check_out_ref("refs/heads/master")?;
+    let output = work_dir.run_jj(["status", "--no-integrate-operation"]);
+    insta::assert_snapshot!(output, @"
+    The working copy has no changes.
+    Working copy  (@) : wqnwkozp 8a57e340 (empty) (no description set)
+    Parent commit (@-): qpvuntsm 8777db25 master | (empty) A
+    [EOF]
+    ------- stderr -------
+    Reset the working copy parent to the new Git HEAD.
+    Operation left uncommitted because --no-integrate-operation was requested: bbe960f5b642
+    [EOF]
+    ");
+    let output = work_dir.run_jj(["status", "--no-integrate-operation"]);
+    insta::assert_snapshot!(output, @"
+    The working copy has no changes.
+    Working copy  (@) : lylxulpl 5c2c75fa (empty) (no description set)
+    Parent commit (@-): qpvuntsm 8777db25 master | (empty) A
+    [EOF]
+    ------- stderr -------
+    Reset the working copy parent to the new Git HEAD.
+    Operation left uncommitted because --no-integrate-operation was requested: a995bf65df58
     [EOF]
     ");
 
@@ -1058,8 +1282,8 @@ fn test_git_colocated_undo_head_move() -> TestResult {
     let output = work_dir.run_jj(["undo"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Undid operation: 370aaac5a54d (2001-02-03 08:05:15) new empty commit
-    Restored to operation: f4eb73ce02a5 (2001-02-03 08:05:14) new empty commit
+    Undid operation: c3aad0e25c1e (2001-02-03 08:05:15) new empty commit
+    Restored to operation: c6c88e19d828 (2001-02-03 08:05:14) new empty commit
     Working copy  (@) now at: vruxwmqv 23e6e06a (empty) (no description set)
     Parent commit (@-)      : qpvuntsm e8849ae1 (empty) (no description set)
     [EOF]
@@ -1643,7 +1867,6 @@ fn test_git_colocated_operation_cleanup() -> TestResult {
     insta::assert_snapshot!(output, @r#"
     ------- stderr -------
     Initialized repo in "repo"
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
 

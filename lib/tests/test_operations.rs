@@ -35,7 +35,6 @@ use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo;
 use jj_lib::settings::UserSettings;
 use pollster::FutureExt as _;
-use test_case::test_case;
 use testutils::CommitBuilderExt as _;
 use testutils::TestRepo;
 use testutils::TestResult;
@@ -45,6 +44,7 @@ use testutils::write_random_commit_with_parents;
 fn get_predecessors(repo: &ReadonlyRepo, id: &CommitId) -> Vec<CommitId> {
     let entries: Vec<_> = walk_predecessors(repo, slice::from_ref(id))
         .try_collect()
+        .block_on()
         .expect("unreachable predecessors shouldn't be visited");
     let first = entries
         .first()
@@ -61,7 +61,7 @@ fn list_dir(dir: &Path) -> Vec<String> {
 }
 
 fn index_has_id(index: &dyn Index, commit_id: &CommitId) -> bool {
-    index.has_id(commit_id).unwrap()
+    index.has_id(commit_id).block_on().unwrap()
 }
 
 #[test]
@@ -471,9 +471,8 @@ fn test_reparent_range_branchy() -> TestResult {
     Ok(())
 }
 
-#[test_case(false; "legacy commit.predecessors")]
-#[test_case(true; "op.commit_predecessors")]
-fn test_reparent_discarding_predecessors(op_stores_commit_predecessors: bool) -> TestResult {
+#[test]
+fn test_reparent_discarding_predecessors() -> TestResult {
     let test_repo = TestRepo::init();
     let repo_0 = test_repo.repo;
     let loader = repo_0.loader();
@@ -529,28 +528,13 @@ fn test_reparent_discarding_predecessors(op_stores_commit_predecessors: bool) ->
     tx.repo_mut().rebase_descendants().block_on()?;
     let repo_4 = tx.commit("op4").block_on()?;
 
-    let repo_4 = if op_stores_commit_predecessors {
-        repo_4
-    } else {
-        // Save operation without the predecessors as old jj would do. We only
-        // need to rewrite the head operation since walk_predecessors() will
-        // fall back to the legacy code path immediately.
-        let mut data = repo_4.operation().store_operation().clone();
-        data.commit_predecessors = None;
-        let op_id = op_store.write_operation(&data).block_on()?;
-        repo_at(&op_id)
-    };
-
     // Sanity check for the setup
     assert_eq!(repo_1.view().heads().len(), 1);
     assert_eq!(repo_2.view().heads().len(), 2);
     assert_eq!(repo_3.view().heads().len(), 2);
     assert_eq!(repo_4.view().heads().len(), 1);
     assert_eq!(repo_4.index().all_heads_for_gc()?.count(), 3);
-    assert_eq!(
-        repo_4.operation().stores_commit_predecessors(),
-        op_stores_commit_predecessors
-    );
+    assert!(repo_4.operation().stores_commit_predecessors(),);
     assert_eq!(
         get_predecessors(&repo_4, commit_a1.id()),
         [commit_a0.id().clone()]
@@ -604,25 +588,12 @@ fn test_reparent_discarding_predecessors(op_stores_commit_predecessors: bool) ->
     let repo = repo_at(&stats.new_head_ids[0]);
     // A0 is still reachable
     assert!(index_has_id(repo.index(), commit_a0.id()));
-    if op_stores_commit_predecessors {
-        // B0 is no longer reachable
-        assert!(!index_has_id(repo.index(), commit_b0.id()));
-        // the predecessor record `A1: A0` no longer exists
-        assert_eq!(get_predecessors(&repo, commit_a1.id()), []);
-        // Unreachable predecessors should be excluded
-        assert_eq!(get_predecessors(&repo, commit_b1.id()), []);
-    } else {
-        // B0 is retained because it is immediate predecessor of B1
-        assert!(index_has_id(repo.index(), commit_b0.id()));
-        assert_eq!(
-            get_predecessors(&repo, commit_a1.id()),
-            [commit_a0.id().clone()]
-        );
-        assert_eq!(
-            get_predecessors(&repo, commit_b1.id()),
-            [commit_b0.id().clone()]
-        );
-    }
+    // B0 is no longer reachable
+    assert!(!index_has_id(repo.index(), commit_b0.id()));
+    // the predecessor record `A1: A0` no longer exists
+    assert_eq!(get_predecessors(&repo, commit_a1.id()), []);
+    // Unreachable predecessors should be excluded
+    assert_eq!(get_predecessors(&repo, commit_b1.id()), []);
 
     // Abandon op1, op2, and op3
     let stats = op_walk::reparent_range(
@@ -670,20 +641,22 @@ fn test_resolve_op_id() -> TestResult {
     let mut operations = Vec::new();
     // The actual value of `i` doesn't matter, we just need to make sure we end
     // up with hashes with ambiguous prefixes.
-    for i in (1..5).chain([10, 24]) {
+    for i in (1..5).chain([10, 24, 9]) {
         let tx = repo.start_transaction();
         let repo = tx.commit(format!("transaction {i}")).block_on()?;
         operations.push(repo.operation().clone());
     }
-    // "3" and "0" are ambiguous
+    // "b" is ambiguous (operations[2] and operations[5])
+    // "0" is ambiguous with the root operation (operations[6])
     insta::assert_debug_snapshot!(operations.iter().map(|op| op.id().hex()).collect_vec(), @r#"
     [
-        "3fb99188ad57448697795ade6d59a7fc36c4ba9daa5ce5501ec2e2bb23a027e7358ededd902994b7e9fc319d262c7679af7f079cdf5403ec2784a33f79f17c21",
-        "75f94ddb7d65b220acca16ff4d5a1851945051803d809b66aeb1cd12b77ad8a1cf8973cb531a4524c1948812bf3ccd650bf8988e692d7bd7fa47f08f4c506abd",
-        "de94b57efe85cd747450956e5f8221a277db649e91e643d9ccd524ab0574630abc04dd4fe81108090bfc4e183c62b3ba1b1a3ee077020ea6587a59703990ddc2",
-        "9874219f414e4bba6564c54782ed1016a5ae63d695d6b0e1165983365d527bf10af3016a0e20020c24d2208bf20ef284e2a628c8c99d9742475d51eb6417c867",
-        "380b1e3403ee19d0696441eb38eb9aeac36ac82769012a1bc370825705b745a8dab42f3bbdb1223e0adf860d15290134340842ba2d3e3ec7462a0c8cce54d54c",
-        "08b1bc4a1537ea549fa001dbc29b474f8fd3469facbab331ee2b5e3807eaaf95d04d967e270499ffb7a38098eec0dff97cdb5c7b44ba755f9b71c9924f80c16e",
+        "33d54aefeb762fec7d849fba6cdb19e4f571f9b0a14445c9ab764d800d52c7abbe9d6bb8a152a6e2b02514de2ca769038c8e3ec0093d254369d1c138eaf5b02a",
+        "13f64f9b2c7a8a882f3e5e03885cdc0cb64c8bc40e6f2b6f188c84a4ac49f9e6f1e49e5b3a1c627ef8c077184ea870e532a06554c9e9783bf78338a5e4c0b781",
+        "b1e7aa2b8e7d6015d7f281baadb1f34bdbb8841a762a7e164f7849973ace8d0b8f87309416ccc81c0459373846022c24a93486f8a4ed2ff0ec4221b587ca28f2",
+        "c9cc85d1bf80aa756583a1ba708961f94643277ae716d913b17152e80b42f1886afd1127ec8e34fc15507040ec5a643e32d4b727ea70417ba2fbb29e2e225f88",
+        "94cfe4b05e25e4329dcd2494e0e4a4e4a6608c65ccc9d0a186c81d3bf8f5606ec7b31cd9333dcacbc658ebe0df5e51f91d2d52b58a5806e1273d31c083e4acd6",
+        "b527c15f0261c2520ffe84056f8eb3a216a9994b7117fe17b996f7203bb3cebeace369461f481c412f9969a91490dc5af629efe109c3433afa0c6d0b26fdbc17",
+        "007480c57328c8532149d66fb2a44b6e4ff79e44362e0c9578f82c4147c8cbebf84ad08d9a1f661814902cef89bc76d90628cb606f2431e45f74493d5e1e0cbd",
     ]
     "#);
 
@@ -698,7 +671,7 @@ fn test_resolve_op_id() -> TestResult {
     assert_eq!(resolve(&operations[1].id().hex()[..2])?, operations[1]);
     // Ambiguous id
     assert_matches!(
-        resolve("3"),
+        resolve("b"),
         Err(OpsetEvaluationError::OpsetResolution(
             OpsetResolutionError::AmbiguousIdPrefix(_)
         ))
@@ -720,14 +693,22 @@ fn test_resolve_op_id() -> TestResult {
     // Virtual root id
     let root_operation = loader.root_operation().block_on();
     assert_eq!(resolve(&root_operation.id().hex())?, root_operation);
-    assert_eq!(resolve("00")?, root_operation);
-    assert_eq!(resolve("08")?, operations[5]);
+    assert_eq!(resolve("b5")?, operations[5]);
+    // "0" is ambiguous with the root operation and operations[6]
     assert_matches!(
         resolve("0"),
         Err(OpsetEvaluationError::OpsetResolution(
             OpsetResolutionError::AmbiguousIdPrefix(_)
         ))
     );
+    assert_matches!(
+        resolve("00"),
+        Err(OpsetEvaluationError::OpsetResolution(
+            OpsetResolutionError::AmbiguousIdPrefix(_)
+        ))
+    );
+    assert_eq!(resolve("000")?, root_operation);
+    assert_eq!(resolve("007")?, operations[6]);
     Ok(())
 }
 

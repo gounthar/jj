@@ -18,7 +18,6 @@ use clap_complete::ArgValueCandidates;
 use itertools::Itertools as _;
 use jj_lib::config::ConfigGetResultExt as _;
 use jj_lib::git;
-use jj_lib::git::FetchTagsOverride;
 use jj_lib::git::GitFetch;
 use jj_lib::git::GitFetchRefExpression;
 use jj_lib::git::GitSettings;
@@ -36,12 +35,15 @@ use crate::cli_util::CommandHelper;
 use crate::cli_util::WorkspaceCommandHelper;
 use crate::cli_util::WorkspaceCommandTransaction;
 use crate::command_error::CommandError;
+use crate::command_error::cli_error;
 use crate::command_error::user_error;
 use crate::commands::git::get_single_remote;
 use crate::complete;
 use crate::git_util::GitSubprocessUi;
 use crate::git_util::load_git_import_options;
 use crate::git_util::print_git_import_stats;
+use crate::revset_util::parse_remote_fetch_bookmarks;
+use crate::revset_util::parse_remote_fetch_tags;
 use crate::revset_util::parse_union_name_patterns;
 use crate::ui::Ui;
 
@@ -51,8 +53,15 @@ use crate::ui::Ui;
 /// `git.fetch` setting. If that is not configured and there are multiple
 /// remotes, the remote named "origin" will be used.
 ///
-/// If no branches nor tags are specified, the default fetch refspecs for the
-/// selected remotes are read from the Git configuration.
+/// If no branches nor tags are specified, fetches bookmarks and tags specified
+/// by the `remotes.<name>.fetch-bookmarks`/`fetch-tags` settings. If
+/// `remotes.<name>.fetch-bookmarks` is not configured, the default fetch
+/// refspecs for the selected remotes are read from the Git configuration.
+///
+/// Commits that are no longer reachable from any branch on the remote will be
+/// considered abandoned by the remote, and will be abandoned in the local repo
+/// to match the remote. Set `git.abandon-unreachable-commits` to `false` to
+/// disable this behavior.
 ///
 /// If a working-copy commit gets abandoned, it will be given a new, empty
 /// commit. This is true in general; it is not specific to this command.
@@ -92,13 +101,12 @@ pub struct GitFetchArgs {
     /// [logical operators]:
     ///     https://docs.jj-vcs.dev/latest/revsets/#string-patterns
     #[arg(long = "tag", short, group = "specific", value_name = "TAG")]
-    #[arg(hide = true)] // TODO: unhide when this gets stabilized (#7528)
     tags: Option<Vec<String>>,
 
-    /// Fetch only tracked bookmarks
+    /// Fetch only tracked bookmarks and tags
     ///
-    /// This fetches only bookmarks that are already tracked from the specified
-    /// remote(s).
+    /// This fetches only bookmarks and tags that are already tracked from the
+    /// specified remote(s).
     #[arg(long, conflicts_with = "specific")]
     tracked: bool,
 
@@ -125,7 +133,12 @@ pub async fn cmd_git_fetch(
     command: &CommandHelper,
     args: &GitFetchArgs,
 ) -> Result<(), CommandError> {
-    let mut workspace_command = command.workspace_helper(ui)?;
+    if command.global_args().no_integrate_operation {
+        // TODO: Remove this restriction by fetching remote refs in memory or
+        // into a temporary namespace.
+        return Err(cli_error("--no-integrate-operation is not respected"));
+    }
+    let mut workspace_command = command.workspace_helper(ui).await?;
     let remote_expr = if args.all_remotes {
         StringExpression::all()
     } else if let Some(remotes) = &args.remotes {
@@ -159,6 +172,7 @@ pub async fn cmd_git_fetch(
     }
 
     let mut tx = workspace_command.start_transaction();
+    let remote_settings = tx.settings().remote_settings()?;
 
     let is_specific = args.branches.is_some() || args.tags.is_some();
     let common_bookmark_expr = match &args.branches {
@@ -189,23 +203,28 @@ pub async fn cmd_git_fetch(
                     .collect(),
             );
             let ref_expr = GitFetchRefExpression { bookmark, tag };
-            expansions.push((remote, expand_fetch_refspecs(remote, ref_expr)?));
+            let expanded = expand_fetch_refspecs(remote, ref_expr)?;
+            expansions.push((remote, expanded));
         }
     } else {
         let git_repo = get_git_backend(tx.repo_mut().store())?.git_repo();
         for remote in &matching_remotes {
-            // TODO: add native config for default bookmark/tag patterns? (#7819)
             let bookmark = if let Some(expr) = &common_bookmark_expr {
                 expr.clone()
+            } else if let Some(expr) = parse_remote_fetch_bookmarks(ui, &remote_settings, remote)? {
+                expr
             } else {
                 let (ignored, expr) = load_default_fetch_bookmarks(remote, &git_repo)?;
                 warn_ignored_refspecs(ui, remote, ignored)?;
                 expr
             };
-            let tag = common_tag_expr
-                .clone()
-                // TODO: disable implicit fetching and set this to "all" (#7528)
-                .unwrap_or_else(StringExpression::none);
+            let tag = if let Some(expr) = &common_tag_expr {
+                expr.clone()
+            } else if let Some(expr) = parse_remote_fetch_tags(ui, &remote_settings, remote)? {
+                expr
+            } else {
+                StringExpression::all()
+            };
             let ref_expr = GitFetchRefExpression { bookmark, tag };
             let expanded = expand_fetch_refspecs(remote, ref_expr)?;
             expansions.push((remote, expanded));
@@ -213,20 +232,16 @@ pub async fn cmd_git_fetch(
     }
 
     let git_settings = GitSettings::from_settings(tx.settings())?;
-    let remote_settings = tx.settings().remote_settings()?;
     let import_options = load_git_import_options(ui, &git_settings, &remote_settings)?;
     let mut git_fetch = GitFetch::new(
         tx.repo_mut(),
         git_settings.to_subprocess_options(),
         &import_options,
     )?;
-    // Disable implicit tag fetching if patterns are explicitly set. NoTags will
-    // be the default when this feature gets stabilized. (#7528)
-    let fetch_tags = (args.tags.is_some() || args.tracked).then_some(FetchTagsOverride::NoTags);
 
     for (remote, expanded) in expansions {
         let mut callback = GitSubprocessUi::new(ui);
-        git_fetch.fetch(remote, expanded, &mut callback, None, fetch_tags)?;
+        git_fetch.fetch(remote, expanded, &mut callback, None)?;
     }
 
     let import_stats = git_fetch.import_refs().await?;

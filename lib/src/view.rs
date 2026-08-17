@@ -21,6 +21,8 @@ use itertools::Itertools as _;
 use thiserror::Error;
 
 use crate::backend::CommitId;
+use crate::index::Index;
+use crate::index::IndexResult;
 use crate::op_store;
 use crate::op_store::LocalRemoteRefTarget;
 use crate::op_store::RefTarget;
@@ -39,15 +41,23 @@ use crate::refs::LocalAndRemoteRef;
 use crate::str_util::StringMatcher;
 
 /// A wrapper around [`op_store::View`] that defines additional methods.
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(Eq, Debug, Clone)]
 pub struct View {
     data: op_store::View,
+    head_normalized: bool,
+}
+
+impl PartialEq for View {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
 }
 
 impl View {
-    pub fn new(op_store_view: op_store::View) -> Self {
+    pub fn new(op_store_view: op_store::View, head_normalized: bool) -> Self {
         Self {
             data: op_store_view,
+            head_normalized,
         }
     }
 
@@ -97,16 +107,21 @@ impl View {
         &self.data.git_refs
     }
 
-    pub fn git_head(&self) -> &RefTarget {
-        &self.data.git_head
+    pub fn git_head(&self, workspace: &WorkspaceName) -> &RefTarget {
+        self.data.git_heads.get(workspace).flatten()
+    }
+
+    pub fn all_git_heads(&self) -> &BTreeMap<WorkspaceNameBuf, RefTarget> {
+        &self.data.git_heads
     }
 
     pub fn set_wc_commit(&mut self, name: WorkspaceNameBuf, commit_id: CommitId) {
         self.data.wc_commit_ids.insert(name, commit_id);
     }
 
-    pub fn remove_wc_commit(&mut self, name: &WorkspaceName) {
+    pub fn remove_workspace(&mut self, name: &WorkspaceName) {
         self.data.wc_commit_ids.remove(name);
+        self.data.git_heads.remove(name);
     }
 
     pub fn rename_workspace(
@@ -124,16 +139,36 @@ impl View {
                 name: old_name.to_owned(),
             }
         })?;
-        self.data.wc_commit_ids.insert(new_name, wc_commit_id);
+        self.data
+            .wc_commit_ids
+            .insert(new_name.clone(), wc_commit_id);
+        if let Some(git_head) = self.data.git_heads.remove(old_name) {
+            self.data.git_heads.insert(new_name, git_head);
+        }
         Ok(())
     }
 
     pub fn add_head(&mut self, head_id: &CommitId) {
         self.data.head_ids.insert(head_id.clone());
+        self.head_normalized = false;
     }
 
     pub fn remove_head(&mut self, head_id: &CommitId) {
         self.data.head_ids.remove(head_id);
+        self.head_normalized = false;
+    }
+
+    /// Inserts and removes the provided head ids without flipping
+    /// the `head_normalized` bit. This serves as an optimization
+    /// for the common incremental update case. Normalization guarantees
+    /// is up to callers.
+    ///
+    /// `add_head_id` must be a descendant of `remove_head_ids`.
+    pub fn replace_heads(&mut self, add_head_id: CommitId, remove_head_ids: &[CommitId]) {
+        self.data.head_ids.insert(add_head_id);
+        for head_id in remove_head_ids {
+            self.data.head_ids.remove(head_id);
+        }
     }
 
     /// Iterates local bookmark `(name, target)`s in lexicographical order.
@@ -492,6 +527,39 @@ impl View {
         )
     }
 
+    /// Iterates over `(name, TrackingRefPair {local_ref, remote_ref})`s for
+    /// every tag with a name that matches the given pattern, and that is
+    /// present locally and/or on the specified remote.
+    ///
+    /// Entries are sorted by `name`.
+    ///
+    /// Note that this does *not* take into account whether the local tag tracks
+    /// the remote tag or not. Missing values are represented as
+    /// RefTarget::absent_ref() or RemoteRef::absent_ref().
+    pub fn local_remote_tags_matching<'a, 'b>(
+        &'a self,
+        tag_matcher: &'b StringMatcher,
+        remote_name: &RemoteName,
+    ) -> impl Iterator<Item = (&'a RefName, LocalAndRemoteRef<'a>)> + use<'a, 'b> {
+        // Change remote_name to StringMatcher if needed, but merge-join adapter won't
+        // be usable.
+        let maybe_remote_view = self.data.remote_views.get(remote_name);
+        refs::iter_named_local_remote_refs(
+            tag_matcher.filter_btree_map_as_deref(&self.data.local_tags),
+            maybe_remote_view
+                .map(|remote_view| tag_matcher.filter_btree_map_as_deref(&remote_view.tags))
+                .into_iter()
+                .flatten(),
+        )
+        .map(|(name, (local_target, remote_ref))| {
+            let targets = LocalAndRemoteRef {
+                local_target,
+                remote_ref,
+            };
+            (name.as_ref(), targets)
+        })
+    }
+
     pub fn get_git_ref(&self, name: &GitRefName) -> &RefTarget {
         self.data.git_refs.get(name).flatten()
     }
@@ -506,10 +574,14 @@ impl View {
         }
     }
 
-    /// Sets Git HEAD to point to the given target. If the target is absent, the
-    /// reference will be cleared.
-    pub fn set_git_head_target(&mut self, target: RefTarget) {
-        self.data.git_head = target;
+    /// Sets Git HEAD for the given workspace to point to the given target. If
+    /// the target is absent, the entry will be removed.
+    pub fn set_git_head_target(&mut self, workspace: &WorkspaceName, target: RefTarget) {
+        if target.is_present() {
+            self.data.git_heads.insert(workspace.to_owned(), target);
+        } else {
+            self.data.git_heads.remove(workspace);
+        }
     }
 
     /// Iterates all commit ids referenced by this view.
@@ -535,7 +607,7 @@ impl View {
             local_tags,
             remote_views,
             git_refs,
-            git_head,
+            git_heads,
             wc_commit_ids,
         } = &self.data;
         itertools::chain!(
@@ -548,13 +620,14 @@ impl View {
                     .flat_map(|remote_ref| ref_target_ids(&remote_ref.target))
             }),
             git_refs.values().flat_map(ref_target_ids),
-            ref_target_ids(git_head),
+            git_heads.values().flat_map(ref_target_ids),
             wc_commit_ids.values()
         )
     }
 
-    pub fn set_view(&mut self, data: op_store::View) {
+    pub fn set_view(&mut self, data: op_store::View, head_normalized: bool) {
         self.data = data;
+        self.head_normalized = head_normalized;
     }
 
     pub fn store_view(&self) -> &op_store::View {
@@ -563,6 +636,36 @@ impl View {
 
     pub fn store_view_mut(&mut self) -> &mut op_store::View {
         &mut self.data
+    }
+
+    pub fn is_heads_normalized(&self) -> bool {
+        self.head_normalized
+    }
+
+    pub async fn normalize_heads(
+        &mut self,
+        index: &dyn Index,
+        root_commit_id: &CommitId,
+    ) -> IndexResult<()> {
+        if self.head_normalized {
+            return Ok(());
+        }
+        let view = self.store_view_mut();
+        if view.head_ids.is_empty() {
+            view.head_ids.insert(root_commit_id.clone());
+        } else if view.head_ids.len() > 1 {
+            // An empty head_ids set is padded with the root_commit_id, but the
+            // root id is unwanted during the heads resolution.
+            view.head_ids.remove(root_commit_id);
+            view.head_ids = index
+                .heads(&mut view.head_ids.iter())
+                .await?
+                .into_iter()
+                .collect();
+        }
+        assert!(!view.head_ids.is_empty());
+        self.head_normalized = true;
+        Ok(())
     }
 }
 
@@ -596,6 +699,7 @@ mod tests {
     fn test_absent_tracked_bookmarks() {
         let mut view = View {
             data: op_store::View::make_root(CommitId::from_hex("000000")),
+            head_normalized: true,
         };
         let absent_tracked_ref = RemoteRef {
             target: RefTarget::absent(),
@@ -647,6 +751,7 @@ mod tests {
     fn test_absent_tracked_tags() {
         let mut view = View {
             data: op_store::View::make_root(CommitId::from_hex("000000")),
+            head_normalized: true,
         };
         let absent_tracked_ref = RemoteRef {
             target: RefTarget::absent(),

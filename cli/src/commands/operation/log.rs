@@ -18,7 +18,7 @@ use clap_complete::ArgValueCandidates;
 use futures::StreamExt as _;
 use futures::TryStreamExt as _;
 use futures::stream;
-use futures::stream::BoxStream;
+use futures::stream::LocalBoxStream;
 use jj_lib::graph::GraphEdge;
 use jj_lib::graph::reverse_graph;
 use jj_lib::op_walk;
@@ -31,6 +31,7 @@ use crate::cli_util::CommandHelper;
 use crate::cli_util::LogContentFormat;
 use crate::cli_util::WorkspaceCommandEnvironment;
 use crate::cli_util::format_template;
+use crate::cli_util::merge_operations;
 use crate::command_error::CommandError;
 use crate::complete;
 use crate::diff_util::DiffFormatArgs;
@@ -109,7 +110,7 @@ pub async fn cmd_op_log(
     args: &OperationLogArgs,
 ) -> Result<(), CommandError> {
     if command.is_working_copy_writable() {
-        let workspace_command = command.workspace_helper(ui)?;
+        let workspace_command = command.workspace_helper(ui).await?;
         let current_op = workspace_command.repo().operation();
         let repo_loader = workspace_command.workspace().repo_loader();
         do_op_log(ui, workspace_command.env(), repo_loader, current_op, args).await
@@ -143,6 +144,7 @@ async fn do_op_log(
         let language = OperationTemplateLanguage::new(
             repo_loader,
             Some(current_op.id()),
+            workspace_env.cwd(),
             workspace_env.operation_template_extensions(),
         );
         let text = match &args.template {
@@ -171,9 +173,18 @@ async fn do_op_log(
                                op: &Operation,
                                with_content_format: &LogContentFormat| {
             let parent_ops = op.parents().await?;
-            let merged_parent_op = repo_loader
-                .merge_operations(parent_ops.clone(), None)
-                .await?;
+            let workspace_name = None;
+            let transaction_description = None;
+            let command_args = [];
+            let merged_parent_op = merge_operations(
+                None,
+                repo_loader,
+                parent_ops.clone(),
+                workspace_name,
+                transaction_description,
+                &command_args,
+            )
+            .await?;
             let parent_repo = repo_loader.load_at(&merged_parent_op).await?;
             let repo = repo_loader.load_at(op).await?;
 
@@ -235,7 +246,7 @@ async fn do_op_log(
             let edges = ids.iter().cloned().map(GraphEdge::direct).collect();
             (op, edges)
         });
-        let mut stream_nodes: BoxStream<'_, _> = if args.reversed {
+        let mut stream_nodes: LocalBoxStream<'_, _> = if args.reversed {
             stream::iter(
                 reverse_graph(stream.collect::<Vec<_>>().await.into_iter(), Operation::id)?
                     .into_iter()
@@ -243,15 +254,17 @@ async fn do_op_log(
             )
             .boxed()
         } else {
-            stream.boxed()
+            stream.boxed_local()
         };
         while let Some(node) = stream_nodes.next().await {
             let (op, edges) = node?;
             let mut buffer = vec![];
             let within_graph = with_content_format.sub_width(graph.width(op.id(), &edges));
-            within_graph.write(ui.new_formatter(&mut buffer).as_mut(), |formatter| {
-                template.format(&op, formatter)
-            })?;
+            within_graph
+                .write(ui.new_formatter(&mut buffer).as_mut(), async |formatter| {
+                    template.format(&op, formatter)
+                })
+                .await?;
             if let Some(show) = &maybe_show_op_diff {
                 let mut formatter = ui.new_formatter(&mut buffer);
                 show(ui, formatter.as_mut(), &op, &within_graph).await?;
@@ -265,13 +278,15 @@ async fn do_op_log(
             )?;
         }
     } else {
-        let mut stream: BoxStream<'_, _> = if args.reversed {
+        let mut stream: LocalBoxStream<'_, _> = if args.reversed {
             stream::iter(stream.collect::<Vec<_>>().await.into_iter().rev()).boxed()
         } else {
-            stream.boxed()
+            stream.boxed_local()
         };
         while let Some(op) = stream.try_next().await? {
-            with_content_format.write(formatter, |formatter| template.format(&op, formatter))?;
+            with_content_format
+                .write(formatter, async |formatter| template.format(&op, formatter))
+                .await?;
             if let Some(show) = &maybe_show_op_diff {
                 show(ui, formatter, &op, &with_content_format).await?;
             }

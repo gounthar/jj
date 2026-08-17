@@ -23,11 +23,17 @@ use crate::ui::Ui;
 
 /// Update repo with changes made in the underlying Git repo
 ///
+/// Commits that are no longer reachable from any branch in the Git repo will be
+/// considered abandoned in the Git repo, and will be abandoned in the jj
+/// repo to match the Git repo. Set `git.abandon-unreachable-commits` to `false`
+/// to disable this behavior.
+///
 /// If a working-copy commit gets abandoned, it will be given a new, empty
 /// commit. This is true in general; it is not specific to this command.
 ///
-/// There is no need to run this command if you're in colocated workspace
-/// because the import happens automatically there.
+/// By default, this command does nothing in colocated workspaces because the
+/// import happens automatically. Use `--ignore-working-copy` to forcibly import
+/// changes.
 #[derive(clap::Args, Clone, Debug)]
 pub struct GitImportArgs {}
 
@@ -36,14 +42,21 @@ pub async fn cmd_git_import(
     command: &CommandHelper,
     _args: &GitImportArgs,
 ) -> Result<(), CommandError> {
-    let mut workspace_command = command.workspace_helper(ui)?;
+    let mut workspace_command = command.workspace_helper(ui).await?;
+    if command.is_working_copy_writable() && workspace_command.working_copy_shared_with_git() {
+        // Git refs are imported during the snapshot.
+        writeln!(ui.status(), "No import needed in colocated workspaces.")?;
+        return Ok(());
+    }
+
     let git_settings = GitSettings::from_settings(workspace_command.settings())?;
     let remote_settings = workspace_command.settings().remote_settings()?;
     let import_options = load_git_import_options(ui, &git_settings, &remote_settings)?;
+    let workspace_name = workspace_command.workspace_name().to_owned();
     let mut tx = workspace_command.start_transaction();
     // In non-colocated workspace, Git HEAD will never be moved internally by jj.
     // That's why cmd_git_export() doesn't export the HEAD ref.
-    git::import_head(tx.repo_mut()).await?;
+    git::import_head(tx.repo_mut(), &workspace_name).await?;
     let stats = git::import_refs(tx.repo_mut(), &import_options).await?;
     print_git_import_stats(ui, &tx, &stats)?;
     tx.finish(ui, "import git refs").await?;

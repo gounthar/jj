@@ -282,14 +282,68 @@ fn test_snapshot_invalid_ignore_pattern() {
     // Test invalid UTF-8 in .gitignore
     work_dir.write_file(".gitignore", b"\xff\n");
     insta::assert_snapshot!(work_dir.run_jj(["st"]), @"
-    ------- stderr -------
-    Internal error: Failed to snapshot the working copy
-    Caused by:
-    1: Invalid UTF-8 for ignore pattern in $TEST_ENV/repo/.gitignore on line #1: �
-    2: invalid utf-8 sequence of 1 bytes from index 0
+    Working copy changes:
+    A .gitignore
+    Working copy  (@) : qpvuntsm 15f3d11a (no description set)
+    Parent commit (@-): zzzzzzzz 00000000 (empty) (no description set)
     [EOF]
-    [exit status: 255]
     ");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_snapshot_non_utf8_path() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    if testutils::check_strict_utf8_fs(work_dir.root()) {
+        eprintln!(
+            "Skipping test \"test_snapshot_non_utf8_path\" due to strict UTF-8 filesystem for \
+             path {:?}",
+            work_dir.root()
+        );
+        return;
+    }
+
+    std::fs::write(work_dir.root().join(OsStr::from_bytes(b"file\xe0")), "").unwrap();
+    std::fs::create_dir(work_dir.root().join(OsStr::from_bytes(b"dir\xe0"))).unwrap();
+    work_dir.write_file("file", "");
+
+    // The paths that can't be represented as RepoPaths are skipped, and the
+    // snapshot succeeds.
+    insta::assert_snapshot!(work_dir.run_jj(["st"]), @r#"
+    Working copy changes:
+    A file
+    Working copy  (@) : qpvuntsm 3dcf981e (no description set)
+    Parent commit (@-): zzzzzzzz 00000000 (empty) (no description set)
+    [EOF]
+    ------- stderr -------
+    Warning: Skipped some paths because they are not valid UTF-8:
+      .: "dir\xE0"
+      .: "file\xE0"
+    [EOF]
+    "#);
+
+    // .gitignore doesn't apply because we can't build a RepoPath to match
+    // against, so the paths are still reported.
+    work_dir.write_file(".gitignore", b"dir\xe0\nfile\xe0\n");
+    insta::assert_snapshot!(work_dir.run_jj(["st"]), @r#"
+    Working copy changes:
+    A .gitignore
+    A file
+    Working copy  (@) : qpvuntsm 0fbe2679 (no description set)
+    Parent commit (@-): zzzzzzzz 00000000 (empty) (no description set)
+    [EOF]
+    ------- stderr -------
+    Warning: Skipped some paths because they are not valid UTF-8:
+      .: "dir\xE0"
+      .: "file\xE0"
+    [EOF]
+    "#);
 }
 
 #[test]
@@ -363,7 +417,7 @@ fn test_conflict_marker_length_stored_in_working_copy() -> TestResult {
     // Working copy should contain conflict marker length
     let output = work_dir.run_jj(["debug", "local-working-copy"]);
     insta::assert_snapshot!(output.normalize_stdout_with(redact_output), @r#"
-    Current operation: OperationId("072342f0123bbb53824fe316de828240ec981d9d11608e8a31c12253e99cd504d5a0fae3851f6a83941863a85b68954c90b7d6ad2fd4f7da469b7d8a6482c003")
+    Current operation: OperationId("ee791f2181026a056ad383d14dbc749ba44e24fedfd39418954871b83d754929147b951bde1fbcca6a8460932e53a6d7ea739bf054ec0bf03607b9370173d6e5")
     Current tree: MergedTree { tree_ids: Conflicted([TreeId("381273b50cf73f8c81b3f1502ee89e9bbd6c1518"), TreeId("771f3d31c4588ea40a8864b2a981749888e596c2"), TreeId("f56b8223da0dab22b03b8323ced4946329aeb4e0")]), labels: Labeled(["rlvkpnrz ccf9527c \"side-a\"", "qpvuntsm 2205b3ac \"base\"", "zsuskuln d7acaf48 \"side-b\""]), .. }
     Normal { exec_bit: ExecBit(false) }           313 <timestamp> Some(MaterializedConflictData { conflict_marker_len: 11 }) "file"
     [EOF]
@@ -426,7 +480,7 @@ fn test_conflict_marker_length_stored_in_working_copy() -> TestResult {
     // Working copy should still contain conflict marker length
     let output = work_dir.run_jj(["debug", "local-working-copy"]);
     insta::assert_snapshot!(output.normalize_stdout_with(redact_output), @r#"
-    Current operation: OperationId("19bcba55afcdec47b31cf0217b2a4b20dd9d90fe7dd7b4cdf0c52b74735c5407a8fddd1d3b43f37c09223b8b8053289f49bcba58c0af68869f891f582460ad4a")
+    Current operation: OperationId("b196f038bbd8cf84508417da8e974874b52202bc98abca08725e946a7a9ea9e011aeddda805c565f49a1e07e43524161caa56fa438de662aba8a6349b5a44be1")
     Current tree: MergedTree { tree_ids: Conflicted([TreeId("381273b50cf73f8c81b3f1502ee89e9bbd6c1518"), TreeId("771f3d31c4588ea40a8864b2a981749888e596c2"), TreeId("3329c18c95f7b7a55c278c2259e9c4ce711fae59")]), labels: Labeled(["rlvkpnrz ccf9527c \"side-a\"", "qpvuntsm 2205b3ac \"base\"", "zsuskuln d7acaf48 \"side-b\""]), .. }
     Normal { exec_bit: ExecBit(false) }           274 <timestamp> Some(MaterializedConflictData { conflict_marker_len: 11 }) "file"
     [EOF]
@@ -461,7 +515,7 @@ fn test_conflict_marker_length_stored_in_working_copy() -> TestResult {
     // working copy
     let output = work_dir.run_jj(["debug", "local-working-copy"]);
     insta::assert_snapshot!(output.normalize_stdout_with(redact_output), @r#"
-    Current operation: OperationId("ed741c71397533330b01669ac13c3407ed89ba782a65ef038cefef27f95f3e2a513f0d3b04a2f96e79ac8b9e050ea080b06dd6ad2b10fc4e3f6978100b8ec8c9")
+    Current operation: OperationId("65b561ae4667b8b9db3f3d6cb2f6bccd087f17b008ba87b976266e641efdab4f12193407e4f6f8bd76b02eff767a6c173ef53e2c0217be389b05779170a257b6")
     Current tree: MergedTree { tree_ids: Resolved(TreeId("6120567b3cb2472d549753ed3e4b84183d52a650")), labels: Unlabeled, .. }
     Normal { exec_bit: ExecBit(false) }           130 <timestamp> None "file"
     [EOF]
@@ -593,7 +647,7 @@ fn test_snapshot_jjconflict_trees() -> TestResult {
 
     // We should see a warning regarding '.jjconflict' trees being checked out.
     let output = work_dir.run_jj(["st"]);
-    insta::assert_snapshot!(output.to_string().replace('\\', "/"), @"
+    insta::assert_snapshot!(output.to_string().replace('\\', "/"), @r"
     Working copy changes:
     A .jjconflict-base-0/file
     A .jjconflict-side-0/file
@@ -602,7 +656,7 @@ fn test_snapshot_jjconflict_trees() -> TestResult {
     M file
     Working copy  (@) : zsuskuln 2681a418 (no description set)
     Parent commit (@-): kkmpptxz aadeb8eb (conflict) side-b
-    Hint: Conflict in parent commit has been resolved in working copy
+    Hint: Conflict in parent commit has been resolved in working copy.
     [EOF]
     ------- stderr -------
     Warning: The working copy contains '.jjconflict' files. These files are used by `jj` internally and should not be present in the working copy.

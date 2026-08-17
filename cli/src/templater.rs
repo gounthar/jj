@@ -16,11 +16,14 @@
 //! manner.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::error;
 use std::fmt;
 use std::io;
 use std::io::Write;
 use std::iter;
+use std::ops::Range;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use bstr::BStr;
@@ -28,6 +31,7 @@ use bstr::BString;
 use jj_lib::backend::Signature;
 use jj_lib::backend::Timestamp;
 use jj_lib::config::ConfigValue;
+use jj_lib::file_util;
 use jj_lib::op_store::TimestampRange;
 
 use crate::formatter::FormatRecorder;
@@ -79,6 +83,15 @@ impl Template for &BStr {
     }
 }
 
+impl Template for PathBuf {
+    fn format(&self, formatter: &mut TemplateFormatter) -> io::Result<()> {
+        // Render native path bytes directly. Serialization still follows
+        // PathBuf's serde behavior, which can reject non-UTF-8 paths.
+        let bytes = file_util::path_to_bytes(self).map_err(io::Error::other)?;
+        formatter.as_mut().write_all(bytes)
+    }
+}
+
 impl Template for ConfigValue {
     fn format(&self, formatter: &mut TemplateFormatter) -> io::Result<()> {
         write!(formatter, "{self}")
@@ -122,6 +135,47 @@ impl Template for Email {
 // bounded to 0.
 pub type SizeHint = (usize, Option<usize>);
 
+/// Captures from a regex match, accessible by index or name.
+#[derive(Clone, Debug)]
+pub struct RegexCaptures {
+    /// String that matches were found in.
+    haystack: Vec<u8>,
+    /// List of byte ranges in `haystack` for capture groups by index (with 0
+    /// being the full match).
+    capture_ranges: Vec<Range<usize>>,
+    /// Mapping from capture group names to their index.
+    names: HashMap<String, usize>,
+}
+
+impl RegexCaptures {
+    pub fn new(
+        haystack: Vec<u8>,
+        capture_ranges: Vec<Range<usize>>,
+        names: HashMap<String, usize>,
+    ) -> Self {
+        Self {
+            haystack,
+            capture_ranges,
+            names,
+        }
+    }
+
+    #[expect(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.capture_ranges.len()
+    }
+
+    pub fn get(&self, index: usize) -> Option<BString> {
+        self.capture_ranges
+            .get(index)
+            .map(|range| self.haystack[range.start..range.end].into())
+    }
+
+    pub fn name(&self, name: &str) -> Option<BString> {
+        self.names.get(name).and_then(|&i| self.get(i))
+    }
+}
+
 impl Template for String {
     fn format(&self, formatter: &mut TemplateFormatter) -> io::Result<()> {
         write!(formatter, "{self}")
@@ -149,6 +203,12 @@ impl Template for TimestampRange {
         write!(formatter, " - ")?;
         self.end.format(formatter)?;
         Ok(())
+    }
+}
+
+impl Template for Vec<BString> {
+    fn format(&self, formatter: &mut TemplateFormatter) -> io::Result<()> {
+        format_joined(formatter, self, " ")
     }
 }
 
@@ -586,7 +646,7 @@ where
     }
 }
 
-/// Adapter to turn template back to string property.
+/// Adapter to turn template back to byte string property.
 pub struct PlainTextFormattedProperty<T> {
     template: T,
 }
@@ -598,14 +658,14 @@ impl<T> PlainTextFormattedProperty<T> {
 }
 
 impl<T: Template> TemplateProperty for PlainTextFormattedProperty<T> {
-    type Output = String;
+    type Output = BString;
 
     fn extract(&self) -> Result<Self::Output, TemplatePropertyError> {
         let mut output = vec![];
         let mut formatter = PlainTextFormatter::new(&mut output);
         let mut wrapper = TemplateFormatter::new(&mut formatter, propagate_property_error);
         self.template.format(&mut wrapper)?;
-        Ok(String::from_utf8(output).map_err(|err| err.utf8_error())?)
+        Ok(BString::new(output))
     }
 }
 
@@ -753,7 +813,7 @@ where
                         if condition { on_true } else { on_false }
                     },
                 )
-                .into_serialize(),
+                .into_dyn(),
         )
     }
 
@@ -815,6 +875,70 @@ where
         match condition {
             true => self.true_template.format(formatter),
             false => self.false_template.format(formatter),
+        }
+    }
+}
+
+/// Attempts to render or extract contents in order, returns the first
+/// successful output.
+pub struct TryList<T>(Vec<T>);
+
+impl<T> TryList<T> {
+    pub fn new(contents: Vec<T>) -> Self {
+        assert!(!contents.is_empty());
+        Self(contents)
+    }
+
+    fn try_into_inner<U>(self, mut f: impl FnMut(T) -> Option<U>) -> Option<Vec<U>> {
+        self.0.into_iter().map(&mut f).collect()
+    }
+}
+
+/// Converts type-erased properties if all items support the operation.
+impl<'a> AnyTemplateProperty<'a> for TryList<BoxedAnyProperty<'a>> {
+    fn try_into_serialize(self: Box<Self>) -> Option<BoxedSerializeProperty<'a>> {
+        let properties = self.try_into_inner(|p| p.try_into_serialize())?;
+        Some(Box::new(TryList(properties)))
+    }
+
+    fn try_into_template(self: Box<Self>) -> Option<Box<dyn Template + 'a>> {
+        let templates = self.try_into_inner(|p| p.try_into_template())?;
+        Some(Box::new(TryList(templates)))
+    }
+
+    fn try_join(
+        self: Box<Self>,
+        _separator: Box<dyn Template + 'a>,
+    ) -> Option<Box<dyn Template + 'a>> {
+        // NOTE: This is implementable, but currently cannot be called.
+        None
+    }
+}
+
+impl<T: Template> Template for TryList<T> {
+    fn format(&self, formatter: &mut TemplateFormatter) -> io::Result<()> {
+        let (last, contents) = self.0.split_last().unwrap();
+        if let Some(recorder) = contents.iter().find_map(|content| {
+            let mut recorder = FormatRecorder::new(formatter.maybe_color());
+            let mut wrapper = TemplateFormatter::new(&mut recorder, propagate_property_error);
+            content.format(&mut wrapper).is_ok().then_some(recorder)
+        }) {
+            recorder.replay(formatter.as_mut())
+        } else {
+            last.format(formatter) // render the last error normally
+        }
+    }
+}
+
+impl<T: TemplateProperty> TemplateProperty for TryList<T> {
+    type Output = T::Output;
+
+    fn extract(&self) -> Result<Self::Output, TemplatePropertyError> {
+        let (last, contents) = self.0.split_last().unwrap();
+        if let Some(value) = contents.iter().find_map(|p| p.extract().ok()) {
+            Ok(value)
+        } else {
+            last.extract() // propagate the last error
         }
     }
 }

@@ -16,10 +16,10 @@ use std::cmp::max;
 use std::thread;
 
 use assert_matches::assert_matches;
+use jj_lib::default_backend_factories::default_working_copy_factories;
 use jj_lib::repo::Repo as _;
 use jj_lib::working_copy::CheckoutError;
 use jj_lib::workspace::Workspace;
-use jj_lib::workspace::default_working_copy_factories;
 use pollster::FutureExt as _;
 use testutils::TestResult;
 use testutils::TestWorkspace;
@@ -59,7 +59,7 @@ fn test_concurrent_checkout() -> TestResult {
         let mut ws2 = Workspace::load(
             &settings,
             &workspace1_root,
-            &test_workspace1.env.default_store_factories(),
+            &test_workspace1.env.default_backend_factories(),
             &default_working_copy_factories(),
         )?;
         // Reload commit from the store associated with the workspace
@@ -80,7 +80,7 @@ fn test_concurrent_checkout() -> TestResult {
     let ws3 = Workspace::load(
         &settings,
         &workspace1_root,
-        &test_workspace1.env.default_store_factories(),
+        &test_workspace1.env.default_backend_factories(),
         &default_working_copy_factories(),
     )?;
     assert_tree_eq!(*ws3.working_copy().tree()?, tree2);
@@ -125,7 +125,7 @@ fn test_checkout_parallel() -> TestResult {
                 let mut workspace = Workspace::load(
                     &settings,
                     &workspace_root,
-                    &test_env.default_store_factories(),
+                    &test_env.default_backend_factories(),
                     &default_working_copy_factories(),
                 )
                 .unwrap();
@@ -148,7 +148,7 @@ fn test_checkout_parallel() -> TestResult {
                 // different tree than the one we just checked out, but since
                 // write_tree() should take the same lock as check_out(), write_tree()
                 // should never produce a different tree.
-                let mut locked_ws = workspace.start_working_copy_mutation().unwrap();
+                let mut locked_ws = workspace.start_working_copy_mutation().block_on().unwrap();
                 let (new_tree, _stats) = locked_ws
                     .locked_wc()
                     .snapshot(&empty_snapshot_options())

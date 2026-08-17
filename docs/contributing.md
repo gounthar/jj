@@ -49,6 +49,11 @@ it's obvious. If the PR closes an open issue or feature request for the
 project, include the `Closes #<issue-number>` or `Fixes #<issue-number>` in
 the commit description.
 
+If you have been invited to the `jj-vcs/` organization feel free to create
+branches directly in the repo, ideally prefixed by your name or username. This
+allows other people to directly check out your work and possibly integrate them
+in their custom builds of jj.
+
 [Conventional Commits]: https://www.conventionalcommits.org/en/v1.0.0/
 [How to Write a Git Commit Message]: https://cbea.ms/git-commit/
 
@@ -75,11 +80,14 @@ commit. You can do that by creating a new commit on top of the initial commit
 `jj git push`
 will automatically force-push the bookmark.
 
+Mark conversation threads as resolved when you have addressed them. If you
+realize that a comment requires non-trivial changes, write a reply instead and
+ask your reviewer to take another look after updating the code.
+
 When your first PR has been approved, we typically invite you to the
 `jj-vcs/contributors` team to give you contributor access,
 so you can address any remaining minor comments and then merge the PR yourself
-when you're ready. If you realize that some comments require non-trivial
-changes, please ask your reviewer to take another look.
+when you're ready.
 
 If your employer pays anyone (not necessarily you) to contribute to Jujutsu,
 please make sure your GitHub username is [recorded](paid_contributors.md).
@@ -95,12 +103,53 @@ your company's interests, do feel free to approve it.
 This project follows [Google's Open Source Community
 Guidelines](https://opensource.google/conduct/).
 
+### Deprecations and Removals
+
+If your PR removes or renames an option, a command, or config option don't
+remove it immediately. Instead implement a warning that the command, command
+option, or config option is deprecated and will be removed in
+jj `v<current> + 6`. Also add a `// TODO: remove in jj<version+6>+` comment so
+other contributors can remove it later. As we currently release monthly this
+translates to a six month deprecation period. This is something the project
+does to not break workflows and gives users the the option to
+provide feedback on features we plan to remove or supersede with other
+approaches.
+
+Changes to the repo format (everything which is in `.jj/`) are more disruptive.
+We aim to be backwards-compatible for at least a year (12 releases). Also
+consider if it's worth being forwards-compatible (i.e making sure that the last
+N versions of `jj` can read the new format). Examples of such changes are moving
+repo-level configuration out of the repository or deriving the evolog from the
+op-log.
+
+Some things are required to be supported for even longer but that is in the end
+a maintainer decision. Some examples of this were the `jj checkout/merge`
+commands (removed after 24 months/releases) or the `--destination` flag for
+which there is no final removal date yet.
+
 ## Contributing large patches
 
-Before sending a PR for a large change which designs/redesigns or reworks an
-existing component, we require an architecture review from  multiple
-stakeholders, which we do with [Design Docs](design_docs.md), see the
-[process here](design_docs.md#process).
+We welcome contributions from anyone.
+
+If you wish to contribute a new large feature, you are encouraged to discuss
+it in Discord or a GitHub Discussion first before diving in. Before spending
+too much time on a particular design, you should see if the community and the
+maintainers have any feedback on your idea and general approach. It also is a
+better experience for you as an author if you contributed smaller patches
+first, so you understand how the project and the community around it works.
+
+If you open a pull request without discussion first, you may find that the
+community already has discussed this and found a better approach, or that it
+already was deemed not to be a fit for the project.
+
+Since many ideas have come up before, but they haven't been implemented because
+they might be deceptively nuanced, or there may be strong opinions around them,
+bringing it up to the community first helps discover past discussions, so your
+design can be informed by them.
+
+Once you have vetted your idea with the community, please write a
+[Design Doc](design_docs.md) which requires an architecture review from
+multiple stakeholders, see the [process here](design_docs.md#process).
 
 ## Contributing to the documentation
 
@@ -559,7 +608,7 @@ to the `prerelease` version, at `https://jjfan.github.io/jj/prerelease/`.
 back and forth, you can also rebuild the docs for the latest release as follows.
 
     ```shell
-    jj new v1.33.1  # Let's say `jj 1.33.1` is the currently the latest release
+    jj new v1.33.1  # Let's say `jj 1.33.1` is the latest release
     .github/scripts/docs-build-deploy v1.33.1 latest --push
     ```
 

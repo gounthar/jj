@@ -19,6 +19,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::error::Error;
+use std::ffi::OsString;
 use std::fs;
 use std::fs::DirEntry;
 use std::fs::File;
@@ -43,7 +44,10 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use either::Either;
+use futures::AsyncRead;
+use futures::AsyncReadExt as _;
 use futures::StreamExt as _;
+use futures::io::AllowStdIo;
 use itertools::EitherOrBoth;
 use itertools::Itertools as _;
 use once_cell::unsync::OnceCell;
@@ -54,14 +58,13 @@ use rayon::prelude::IndexedParallelIterator as _;
 use rayon::prelude::ParallelIterator as _;
 use tempfile::NamedTempFile;
 use thiserror::Error;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt as _;
 use tracing::instrument;
 use tracing::trace_span;
 
 use crate::backend::BackendError;
 use crate::backend::CopyId;
 use crate::backend::FileId;
+use crate::backend::MergedTreeValue;
 use crate::backend::MillisSinceEpoch;
 use crate::backend::SymlinkId;
 use crate::backend::TreeId;
@@ -79,7 +82,6 @@ use crate::conflicts::materialize_merge_result_to_bytes;
 use crate::conflicts::materialize_tree_value;
 pub use crate::eol::EolConversionMode;
 use crate::eol::TargetEolStrategy;
-use crate::file_util::BlockingAsyncReader;
 use crate::file_util::FileIdentity;
 use crate::file_util::check_symlink_support;
 use crate::file_util::copy_async_to_sync;
@@ -101,7 +103,6 @@ use crate::matchers::PrefixMatcher;
 use crate::matchers::UnionMatcher;
 use crate::merge::Merge;
 use crate::merge::MergeBuilder;
-use crate::merge::MergedTreeValue;
 use crate::merge::SameChange;
 use crate::merged_tree::MergedTree;
 use crate::merged_tree::TreeDiffEntry;
@@ -744,6 +745,27 @@ fn remove_old_file(disk_path: &Path) -> Result<bool, CheckoutError> {
     }
 }
 
+/// Removes existing submodule directory named `disk_path` if any. Returns
+/// `Ok(true)` if the directory was there and got removed, meaning that new file
+/// can be safely created.
+///
+/// The directory will not be removed if it is not empty, as it could contain
+/// untracked or modified files. This is in line with Git's behavior.
+fn remove_old_submodule_dir(disk_path: &Path) -> Result<bool, CheckoutError> {
+    match fs::remove_dir(disk_path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) if err.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(false),
+        Err(err) => Err(CheckoutError::Other {
+            message: format!(
+                "Failed to remove submodule directory {}",
+                disk_path.display()
+            ),
+            err: err.into(),
+        }),
+    }
+}
+
 /// Checks if new file or symlink named `disk_path` can be created.
 ///
 /// If the file already exists, this function return `Ok(false)` to signal
@@ -1037,6 +1059,19 @@ impl TreeState {
         Ok(wc)
     }
 
+    /// Like `init` but does not persist the initial empty tree state to
+    /// disk. Use when the caller will save state itself only after a
+    /// successful operation (e.g. to use `tree_state` file absence as a
+    /// dirty marker).
+    pub fn init_without_saving(
+        store: Arc<Store>,
+        working_copy_path: PathBuf,
+        state_path: PathBuf,
+        tree_state_settings: &TreeStateSettings,
+    ) -> Self {
+        Self::empty(store, working_copy_path, state_path, tree_state_settings)
+    }
+
     fn empty(
         store: Arc<Store>,
         working_copy_path: PathBuf,
@@ -1294,6 +1329,7 @@ impl TreeState {
         let (tree_entries_tx, tree_entries_rx) = channel();
         let (file_states_tx, file_states_rx) = channel();
         let (untracked_paths_tx, untracked_paths_rx) = channel();
+        let (invalid_utf8_paths_tx, invalid_utf8_paths_rx) = channel();
         let (deleted_files_tx, deleted_files_rx) = channel();
 
         trace_span!("traverse filesystem").in_scope(|| -> Result<(), SnapshotError> {
@@ -1307,6 +1343,7 @@ impl TreeState {
                 tree_entries_tx,
                 file_states_tx,
                 untracked_paths_tx,
+                invalid_utf8_paths_tx,
                 deleted_files_tx,
                 error: OnceLock::new(),
                 progress: *progress,
@@ -1329,6 +1366,7 @@ impl TreeState {
 
         let stats = SnapshotStats {
             untracked_paths: untracked_paths_rx.into_iter().collect(),
+            invalid_utf8_paths: invalid_utf8_paths_rx.into_iter().collect(),
         };
         let mut tree_builder = MergedTreeBuilder::new(self.tree.clone());
         trace_span!("process tree entries").in_scope(|| {
@@ -1374,7 +1412,9 @@ impl TreeState {
         // Since untracked paths aren't cached in the tree state, we'll need to
         // rescan the working directory changes to report or track them later.
         // TODO: store untracked paths and update watchman_clock?
-        if stats.untracked_paths.is_empty() || watchman_clock.is_none() {
+        if (stats.untracked_paths.is_empty() && stats.invalid_utf8_paths.is_empty())
+            || watchman_clock.is_none()
+        {
             self.watchman_clock = watchman_clock;
         } else {
             tracing::info!("not updating watchman clock because there are untracked files");
@@ -1478,6 +1518,7 @@ struct FileSnapshotter<'a> {
     tree_entries_tx: Sender<(RepoPathBuf, MergedTreeValue)>,
     file_states_tx: Sender<(RepoPathBuf, FileState)>,
     untracked_paths_tx: Sender<(RepoPathBuf, UntrackedReason)>,
+    invalid_utf8_paths_tx: Sender<(RepoPathBuf, OsString)>,
     deleted_files_tx: Sender<RepoPathBuf>,
     error: OnceLock<SnapshotError>,
     progress: Option<&'a SnapshotProgress<'a>>,
@@ -1522,8 +1563,7 @@ impl FileSnapshotter<'_> {
             file_states,
         } = directory_to_visit;
 
-        let git_ignore = git_ignore
-            .chain_with_file(&dir.to_internal_dir_string(), disk_dir.join(".gitignore"))?;
+        let git_ignore = git_ignore.chain_with_file(&dir, disk_dir.join(".gitignore"))?;
         let dir_entries: Vec<_> = disk_dir
             .read_dir()
             .and_then(|entries| entries.try_collect())
@@ -1562,9 +1602,16 @@ impl FileSnapshotter<'_> {
     ) -> Result<Option<(PresentDirEntryKind, String)>, SnapshotError> {
         let file_type = entry.file_type().unwrap();
         let file_name = entry.file_name();
-        let name_string = file_name
-            .into_string()
-            .map_err(|path| SnapshotError::InvalidUtf8Path { path })?;
+        let name_string = match file_name.into_string() {
+            Ok(name_string) => name_string,
+            Err(name) => {
+                // A path that isn't valid UTF-8 can't be represented as a
+                // RepoPath, so it can never be tracked. Skip it instead of
+                // failing the whole snapshot, and let the caller report it.
+                self.invalid_utf8_paths_tx.send((dir.to_owned(), name)).ok();
+                return Ok(None);
+            }
+        };
 
         if RESERVED_DIR_NAMES.contains(&name_string.as_str()) {
             return Ok(None);
@@ -1594,7 +1641,7 @@ impl FileSnapshotter<'_> {
                 }
             }
 
-            if git_ignore.matches(&path.to_internal_dir_string())
+            if git_ignore.matches_dir(&path)
                 && self.force_tracking_matcher.visit(&path).is_nothing()
             {
                 // If the whole directory is ignored by .gitignore, visit only
@@ -1624,8 +1671,7 @@ impl FileSnapshotter<'_> {
                 progress(&path);
             }
             if maybe_current_file_state.is_none()
-                && (git_ignore.matches(path.as_internal_file_string())
-                    && !self.force_tracking_matcher.matches(&path))
+                && (git_ignore.matches_file(&path) && !self.force_tracking_matcher.matches(&path))
             {
                 // If it wasn't already tracked and it matches
                 // the ignored paths, then ignore it.
@@ -1891,7 +1937,7 @@ impl FileSnapshotter<'_> {
             })?;
             self.tree_state
                 .target_eol_strategy
-                .convert_eol_for_snapshot(BlockingAsyncReader::new(file))
+                .convert_eol_for_snapshot(AllowStdIo::new(file))
                 .await
                 .map_err(|err| SnapshotError::Other {
                     message: "Failed to convert the EOL".to_string(),
@@ -1956,7 +2002,7 @@ impl FileSnapshotter<'_> {
         let mut contents = self
             .tree_state
             .target_eol_strategy
-            .convert_eol_for_snapshot(BlockingAsyncReader::new(file))
+            .convert_eol_for_snapshot(AllowStdIo::new(file))
             .await
             .map_err(|err| SnapshotError::Other {
                 message: "Failed to convert the EOL".to_string(),
@@ -2066,8 +2112,7 @@ impl TreeState {
             debug_assert_ne!(
                 target.as_os_str().to_str().map(|path| path.contains('/')),
                 Some(true),
-                "Expect the symlink target doesn't contain \"/\", but got invalid symlink target: \
-                 {}.",
+                r#"Expect the symlink target doesn't contain "/", but got invalid symlink target: {}."#,
                 target.display()
             );
         }
@@ -2260,12 +2305,34 @@ impl TreeState {
             };
 
             // If the path was present, check reserved path first and delete it.
-            let present_file_deleted = before.is_present() && remove_old_file(&disk_path)?;
+            let present_file_deleted = before.is_present()
+                && if matches!(before.as_normal(), Some(TreeValue::GitSubmodule(_))) {
+                    remove_old_submodule_dir(&disk_path)?
+                } else {
+                    remove_old_file(&disk_path)?
+                };
+
             // If not, create temporary file to test the path validity.
             if !present_file_deleted && !can_create_new_file(&disk_path)? {
-                changed_file_states.push((path, FileState::placeholder()));
-                stats.skipped_files += 1;
-                return Ok(());
+                if matches!(after, MaterializedTreeValue::GitSubmodule(_)) && disk_path.is_dir() {
+                    // Failing to materialize submodule, over a directory which
+                    // is presumably the submodule before it was added in a
+                    // commit, is not an error.
+                    // Falling through to the "after" state code, to set the
+                    // correct file state.
+                } else if matches!(before.as_normal(), Some(TreeValue::GitSubmodule(_)))
+                    && after.is_absent()
+                {
+                    // Failing to delete un-tracked submodule directory is not
+                    // an error, as the, possibly untracked, contents would
+                    // otherwise be lost.
+                    // Falling through to the "after" state code in case there
+                    // are parents to be deleted.
+                } else {
+                    changed_file_states.push((path, FileState::placeholder()));
+                    stats.skipped_files += 1;
+                    return Ok(());
+                }
             }
 
             // We get the previous executable bit from the file states and not
@@ -2309,6 +2376,15 @@ impl TreeState {
                 }
                 MaterializedTreeValue::GitSubmodule(_) => {
                     eprintln!("ignoring git submodule at {path:?}");
+                    // Git behavior: Create the submodule directory but don't
+                    // populate/overwrite the contents.
+                    match fs::create_dir(&disk_path) {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(err) => eprintln!(
+                            "warning: failed to create submodule directory {path:?}: {err}"
+                        ),
+                    }
                     FileState::for_gitsubmodule()
                 }
                 MaterializedTreeValue::Tree(_) => {
@@ -2360,7 +2436,7 @@ impl TreeState {
                 }
                 Err(err) => (path, Err(err)),
             })
-            .buffered(self.store.concurrency().max(1));
+            .buffered(self.store.concurrency());
 
         // If a conflicted file didn't change between the two trees, but the conflict
         // labels did, we still need to re-materialize it in the working copy. We don't
@@ -2543,6 +2619,7 @@ pub struct LocalWorkingCopy {
     tree_state_settings: TreeStateSettings,
 }
 
+#[async_trait(?Send)]
 impl WorkingCopy for LocalWorkingCopy {
     fn name(&self) -> &str {
         Self::name()
@@ -2564,7 +2641,7 @@ impl WorkingCopy for LocalWorkingCopy {
         Ok(self.tree_state()?.sparse_patterns())
     }
 
-    fn start_mutation(&self) -> Result<Box<dyn LockedWorkingCopy>, WorkingCopyStateError> {
+    async fn start_mutation(&self) -> Result<Box<dyn LockedWorkingCopy>, WorkingCopyStateError> {
         let lock_path = self.state_path.join("working_copy.lock");
         let lock = FileLock::lock(lock_path).map_err(|err| WorkingCopyStateError {
             message: "Failed to lock working copy".to_owned(),

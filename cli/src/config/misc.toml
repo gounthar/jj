@@ -15,6 +15,7 @@ context = 3
 
 [diff.git]
 context = 3
+show-path-prefix = true
 
 [experimental-advance-branches]
 enabled-branches = []
@@ -25,8 +26,8 @@ disabled-branches = []
 
 [git]
 colocate = true
+object-hash = "sha1"
 private-commits = "none()"
-push-new-bookmarks = false
 sign-on-push = false
 track-default-bookmark-on-clone = true
 
@@ -35,7 +36,7 @@ color = "auto"
 diff-formatter = ":color-words"
 diff-instructions = true
 graph.style = "curved"
-pager = { command = ["less", "-FRX"], env = { LESSCHARSET = "utf-8" } }
+pager = { command = ["less", "-FRXK"], env = { LESSCHARSET = "utf-8" } }
 paginate = "auto"
 progress-indicator = true
 quiet = false
@@ -46,8 +47,6 @@ conflict-marker-style = "diff"
 show-cryptographic-signatures = false
 bookmark-list-sort-keys = ["name"]
 tag-list-sort-keys = ["name"]
-# TODO: delete revsets-use-glob-by-default in jj 0.43+
-revsets-use-glob-by-default = true
 
 [ui.movement]
 edit = false

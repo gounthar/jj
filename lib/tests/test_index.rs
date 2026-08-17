@@ -16,6 +16,7 @@ use std::fs;
 use std::sync::Arc;
 
 use assert_matches::assert_matches;
+use futures::StreamExt as _;
 use itertools::Itertools as _;
 use jj_lib::backend::ChangeId;
 use jj_lib::backend::CommitId;
@@ -79,12 +80,13 @@ fn enable_changed_path_index(repo: &ReadonlyRepo) -> Arc<ReadonlyRepo> {
 fn collect_changed_paths(repo: &ReadonlyRepo, commit_id: &CommitId) -> Option<Vec<RepoPathBuf>> {
     repo.index()
         .changed_paths_in_commit(commit_id)
+        .block_on()
         .unwrap()
         .map(|paths| paths.collect())
 }
 
 fn index_has_id(index: &dyn Index, commit_id: &CommitId) -> bool {
-    index.has_id(commit_id).unwrap()
+    index.has_id(commit_id).block_on().unwrap()
 }
 
 fn is_ancestor(
@@ -92,7 +94,10 @@ fn is_ancestor(
     ancestor_id: &CommitId,
     descendant_id: &CommitId,
 ) -> bool {
-    index.is_ancestor(ancestor_id, descendant_id).unwrap()
+    index
+        .is_ancestor(ancestor_id, descendant_id)
+        .block_on()
+        .unwrap()
 }
 
 #[test]
@@ -289,7 +294,7 @@ fn test_index_commits_criss_cross() -> TestResult {
         let revset = index.evaluate_revset(&expression, repo.store()).unwrap();
         // Don't switch to more efficient .count() implementation. Here we're
         // testing the iterator behavior.
-        revset.iter().count()
+        revset.stream().count().block_on()
     };
 
     // RevWalk deduplicates chains by entry.
@@ -1170,6 +1175,7 @@ fn test_change_id_index() {
     let prefix_len = |commit: &Commit| {
         change_id_index
             .shortest_unique_prefix_len(commit.change_id())
+            .block_on()
             .unwrap()
     };
     assert_eq!(prefix_len(&root_commit), 1);
@@ -1181,6 +1187,7 @@ fn test_change_id_index() {
     let resolve_prefix = |prefix: &str| {
         change_id_index
             .resolve_prefix(&HexPrefix::try_from_hex(prefix).unwrap())
+            .block_on()
             .unwrap()
     };
     // Ambiguous matches
@@ -1237,6 +1244,7 @@ fn test_change_id_index() {
     let resolve_prefix = |prefix: &str| {
         change_id_index
             .resolve_prefix(&HexPrefix::try_from_hex(prefix).unwrap())
+            .block_on()
             .unwrap()
     };
     assert_eq!(

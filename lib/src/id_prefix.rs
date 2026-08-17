@@ -18,8 +18,9 @@ use std::iter;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use itertools::Itertools as _;
+use futures::TryStreamExt as _;
 use once_cell::sync::OnceCell;
+use pollster::FutureExt as _;
 use thiserror::Error;
 
 use crate::backend::ChangeId;
@@ -71,7 +72,7 @@ impl DisambiguationData {
                 .resolve_user_expression(repo, &symbol_resolver)?
                 .evaluate(repo)?;
 
-            let commit_change_ids: Vec<_> = revset.commit_change_ids().try_collect()?;
+            let commit_change_ids: Vec<_> = revset.commit_change_ids().try_collect().block_on()?;
             let mut commit_index = IdIndex::with_capacity(commit_change_ids.len());
             let mut change_index = IdIndex::with_capacity(commit_change_ids.len());
             for (i, (commit_id, change_id)) in commit_change_ids.iter().enumerate() {
@@ -173,7 +174,7 @@ impl IdPrefixIndex<'_> {
                 PrefixResolution::SingleMatch(id) => {
                     // The disambiguation set may be loaded from a different repo,
                     // and contain a commit that doesn't exist in the current repo.
-                    if repo.index().has_id(&id)? {
+                    if repo.index().has_id(&id).block_on()? {
                         return Ok(PrefixResolution::SingleMatch(id));
                     } else {
                         return Ok(PrefixResolution::NoMatch);
@@ -184,7 +185,7 @@ impl IdPrefixIndex<'_> {
                 }
             }
         }
-        repo.index().resolve_commit_id_prefix(prefix)
+        repo.index().resolve_commit_id_prefix(prefix).block_on()
     }
 
     /// Returns the shortest length of a prefix of `commit_id` that can still be
@@ -214,11 +215,13 @@ impl IdPrefixIndex<'_> {
         {
             return Ok(lookup.shortest_unique_prefix_len());
         }
-        repo.index().shortest_unique_commit_id_prefix_len(commit_id)
+        repo.index()
+            .shortest_unique_commit_id_prefix_len(commit_id)
+            .block_on()
     }
 
     /// Resolve an unambiguous change ID prefix to the commit IDs in the revset.
-    pub fn resolve_change_prefix(
+    pub async fn resolve_change_prefix(
         &self,
         repo: &dyn Repo,
         prefix: &HexPrefix,
@@ -232,7 +235,7 @@ impl IdPrefixIndex<'_> {
                     // Fall back to resolving in entire repo
                 }
                 PrefixResolution::SingleMatch(change_id) => {
-                    return match repo.resolve_change_id(&change_id)? {
+                    return match repo.resolve_change_id(&change_id).await? {
                         // There may be more commits with this change id outside the narrower sets.
                         Some(commit_ids) => Ok(PrefixResolution::SingleMatch(commit_ids)),
                         // The disambiguation set may contain hidden commits.
@@ -244,17 +247,19 @@ impl IdPrefixIndex<'_> {
                 }
             }
         }
-        repo.resolve_change_id_prefix(prefix)
+        repo.resolve_change_id_prefix(prefix).await
     }
 
     /// Returns the shortest length of a prefix of `change_id` that can still be
     /// resolved by `resolve_change_prefix()` and [`SymbolResolver`].
-    pub fn shortest_change_prefix_len(
+    pub async fn shortest_change_prefix_len(
         &self,
         repo: &dyn Repo,
         change_id: &ChangeId,
     ) -> IndexResult<usize> {
-        let len = self.shortest_change_prefix_len_exact(repo, change_id)?;
+        let len = self
+            .shortest_change_prefix_len_exact(repo, change_id)
+            .await?;
         Ok(disambiguate_prefix_with_refs(
             repo.view(),
             &change_id.to_string(),
@@ -262,7 +267,7 @@ impl IdPrefixIndex<'_> {
         ))
     }
 
-    fn shortest_change_prefix_len_exact(
+    async fn shortest_change_prefix_len_exact(
         &self,
         repo: &dyn Repo,
         change_id: &ChangeId,
@@ -274,7 +279,7 @@ impl IdPrefixIndex<'_> {
         {
             return Ok(lookup.shortest_unique_prefix_len());
         }
-        repo.shortest_unique_change_id_prefix_len(change_id)
+        repo.shortest_unique_change_id_prefix_len(change_id).await
     }
 }
 
@@ -282,8 +287,8 @@ fn disambiguate_prefix_with_refs(view: &View, id_sym: &str, min_len: usize) -> u
     debug_assert!(id_sym.is_ascii());
     (min_len..id_sym.len())
         .find(|&n| {
-            // Tags, bookmarks, and Git refs have higher priority, but Git refs
-            // should include "/" char. Extension symbols have lower priority.
+            // Tags and bookmarks have higher priority. Extension symbols have
+            // lower priority.
             let prefix = &id_sym[..n];
             view.get_local_tag(prefix.as_ref()).is_absent()
                 && view.get_local_bookmark(prefix.as_ref()).is_absent()

@@ -143,8 +143,8 @@ commit_id = "ansi-color-81"
 
 If you use a string value for a color, as in the examples above, it will be used
 for the foreground color. You can also set the background color, reverse colors
-(swap foreground and background), or make the text bold, dim, italic, or
-underlined. For that, you need to use a table:
+(swap foreground and background), or make the text bold, dim, italic,
+underlined, or crossed-out. For that, you need to use a table:
 
 ```toml
 [colors]
@@ -719,7 +719,7 @@ show-cryptographic-signatures = true
 ## Pager
 
 By default, jj will paginate output that would scroll off the screen. It does
-this by passing output through `less -FRX` on most platforms (on Windows it uses
+this by passing output through `less -FRXK` on most platforms (on Windows it uses
 [the pager](#builtin-pager) that is built-in to jj).
 
 Which pager to use can be customized by setting `ui.pager`. When choosing a
@@ -729,14 +729,14 @@ pager, ensure that it either supports color codes or that you disable color (see
 Examples:
 
 ```shell
-# Pipe output through `less -FRX` (default on non-Windows platforms)
-$ jj config set --user ui.pager "less -FRX"
+# Pipe output through `less -FRXK` (default on non-Windows platforms)
+$ jj config set --user ui.pager "less -FRXK"
 
 # Use the built-in pager (default on Windows)
 $ jj config set --user ui.pager :builtin
 
 # Use `$PAGER` environment variable if set (on non-Windows platforms)
-$ jj config set --user ui.pager '["sh", "-c", "exec ${PAGER:-less -FRX}"]'
+$ jj config set --user ui.pager '["sh", "-c", "exec ${PAGER:-less -FRXK}"]'
 ```
 
 Additionally, paging behavior can be toggled via `ui.paginate` like so:
@@ -1910,6 +1910,17 @@ For example, the following could be used to run `jj` without loading any user co
 ```bash
 JJ_CONFIG= jj log       # Ignores any settings specified in the config file.
 ```
+
+### System config files
+
+On unix-like platforms, system-wide `jj` configurations are by default loaded in
+the following precedence order (with later configs overriding earlier ones).
+
+- `/etc/jj/config.toml`
+- `/etc/jj/conf.d/*.toml`
+
+These configs can be overridden by [the user config files], and will be disabled
+in favor of the `JJ_CONFIG` environment variable if it is set.
 
 ### JSON Schema Support
 

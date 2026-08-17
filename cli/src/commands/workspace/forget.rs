@@ -42,7 +42,7 @@ pub async fn cmd_workspace_forget(
     command: &CommandHelper,
     args: &WorkspaceForgetArgs,
 ) -> Result<(), CommandError> {
-    let mut workspace_command = command.workspace_helper(ui)?;
+    let mut workspace_command = command.workspace_helper(ui).await?;
 
     let wss = if args.workspaces.is_empty() {
         vec![workspace_command.workspace_name().to_owned()]
@@ -79,7 +79,7 @@ pub async fn cmd_workspace_forget(
     let mut tx = workspace_command.start_transaction();
 
     for ws in &forget_ws {
-        tx.repo_mut().remove_wc_commit(ws).await?;
+        tx.repo_mut().remove_workspace(ws).await?;
     }
 
     workspace_store.forget(&forget_ws.iter().map(|x| x.as_ref()).collect::<Vec<_>>())?;

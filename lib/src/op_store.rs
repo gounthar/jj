@@ -16,7 +16,6 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::iter;
@@ -254,10 +253,9 @@ pub struct View {
     pub local_tags: BTreeMap<RefNameBuf, RefTarget>,
     pub remote_views: BTreeMap<RemoteNameBuf, RemoteView>,
     pub git_refs: BTreeMap<GitRefNameBuf, RefTarget>,
-    /// The commit the Git HEAD points to.
-    // TODO: Support multiple Git worktrees?
+    /// The commit each workspace's Git HEAD points to, keyed by workspace name.
     // TODO: Do we want to store the current bookmark name too?
-    pub git_head: RefTarget,
+    pub git_heads: BTreeMap<WorkspaceNameBuf, RefTarget>,
     // The commit that *should be* checked out in the workspace. Note that the working copy
     // (.jj/working_copy/) has the source of truth about which commit *is* checked out (to be
     // precise: the commit to which we most recently completed an update to).
@@ -273,7 +271,7 @@ impl View {
             local_tags: BTreeMap::new(),
             remote_views: BTreeMap::new(),
             git_refs: BTreeMap::new(),
-            git_head: RefTarget::absent(),
+            git_heads: BTreeMap::new(),
             wc_commit_ids: BTreeMap::new(),
         }
     }
@@ -375,8 +373,8 @@ pub struct Operation {
     /// `X` was rewritten as `Y`, then rebased as `Z`, these modifications are
     /// recorded as `{Y: [X], Z: [Y]}`.
     ///
-    /// Existing commits (including commits imported from Git) aren't tracked
-    /// even if they became visible at this operation.
+    /// Existing commits (including some commits imported from Git) aren't
+    /// tracked even if they became visible at this operation.
     // BTreeMap for ease of deterministic serialization. If the deserialization
     // cost matters, maybe this can be changed to sorted Vec.
     #[serde(skip)] // TODO: should be exposed?
@@ -399,7 +397,7 @@ impl Operation {
             username: "".to_string(),
             is_snapshot: false,
             workspace_name: None,
-            tags: HashMap::new(),
+            attributes: BTreeMap::new(),
         };
         Self {
             view_id: root_view_id,
@@ -426,7 +424,7 @@ pub struct OperationMetadata {
     pub is_snapshot: bool,
     /// The workspace this operation was performed in, if any
     pub workspace_name: Option<WorkspaceNameBuf>,
-    pub tags: HashMap<String, String>,
+    pub attributes: BTreeMap<String, String>,
 }
 
 /// Data to be loaded into the root operation/view.

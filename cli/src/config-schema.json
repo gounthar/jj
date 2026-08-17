@@ -115,7 +115,7 @@
                 },
                 "pager": {
                     "description": "Pager to use for displaying command output",
-                    "default": "less -FRX",
+                    "default": "less -FRXK",
                     "oneOf": [
                         {
                             "$ref": "#/properties/ui/definitions/command"
@@ -234,11 +234,6 @@
                 },
                 "conflict-marker-style": {
                     "$ref": "#/properties/ui/definitions/conflict-marker-style"
-                },
-                "revsets-use-glob-by-default": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "Whether to use glob string patterns in revsets by default"
                 },
                 "show-cryptographic-signatures": {
                     "type": "boolean",
@@ -402,6 +397,9 @@
                             "underline": {
                                 "type": "boolean"
                             },
+                            "crossed-out": {
+                                "type": "boolean"
+                            },
                             "reverse": {
                                 "type": "boolean"
                             }
@@ -447,6 +445,21 @@
                             "type": "integer",
                             "description": "Number of lines of context to show",
                             "default": 3
+                        },
+                        "show-path-prefix": {
+                            "type": "boolean",
+                            "description": "Whether to show the 'a/' and 'b/' path prefixes",
+                            "default": true
+                        }
+                    }
+                },
+                "stat": {
+                    "type": "object",
+                    "description": "Options for the diff stat display",
+                    "properties": {
+                        "context": {
+                            "type": "integer",
+                            "description": "Maximum number of characters to show in the `++--` stat bar"
                         }
                     }
                 }
@@ -456,7 +469,25 @@
             "type": "object",
             "description": "Custom symbols/function aliases that can be used in fileset expressions",
             "additionalProperties": {
-                "type": "string"
+                "oneOf": [
+                    {
+                        "type": "string"
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "definition": {
+                                "type": "string"
+                            },
+                            "doc": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "definition"
+                        ]
+                    }
+                ]
             }
         },
         "git": {
@@ -493,6 +524,11 @@
                     "description": "The remote to which commits are pushed",
                     "default": "origin"
                 },
+                "record-synthetic-predecessors": {
+                    "type": "boolean",
+                    "description": "Whether to generate synthetic predecessors for fetched/imported commits",
+                    "default": true
+                },
                 "sign-on-push": {
                     "type": "boolean",
                     "description": "Whether jj should sign commits before pushing",
@@ -517,6 +553,11 @@
                     "type": "boolean",
                     "description": "Whether to colocate the working copy with the git repository",
                     "default": true
+                },
+                "object-hash": {
+                    "enum": ["sha1", "sha256"],
+                    "description": "Object hash algorithm used when initializing a new Git repository",
+                    "default": "sha1"
                 }
             }
         },
@@ -535,6 +576,14 @@
                         "type": "string",
                         "description": "A string pattern describing the locally-created bookmarks which should track this remote automatically. It will be applied to new bookmarks created with `jj bookmark create` or `jj bookmark set`. See https://docs.jj-vcs.dev/latest/config/#automatic-tracking-of-bookmarks",
                         "default": "~*"
+                    },
+                    "fetch-bookmarks": {
+                        "type": "string",
+                        "description": "A string pattern describing the bookmarks to fetch by default"
+                    },
+                    "fetch-tags": {
+                        "type": "string",
+                        "description": "A string pattern describing the tags to fetch by default"
                     }
                 }
             }
@@ -612,7 +661,7 @@
                         "default": true
                     },
                     "diff-invocation-mode": {
-                        "description": "Invoke the tool with directories or individual files",
+                        "description": "Invoke the tool with directories or individual files when generating diffs.",
                         "enum": [
                             "dir",
                             "file-by-file"
@@ -624,6 +673,14 @@
                         "items": {
                             "type": "string"
                         }
+                    },
+                    "edit-invocation-mode": {
+                        "description": "Invoke the tool with directories or individual files when editing diffs (e.g. jj diffedit, jj split).",
+                        "enum": [
+                            "dir",
+                            "file-by-file"
+                        ],
+                        "default": "dir"
                     },
                     "merge-args": {
                         "type": "array",
@@ -667,12 +724,17 @@
                 "log": {
                     "type": "string",
                     "description": "Default set of revisions to show when no explicit revset is given for jj log and similar commands",
-                    "default": "present(@) | ancestors(immutable_heads().., 2) | trunk()"
+                    "default": "builtin_log()"
                 },
                 "short-prefixes": {
                     "type": "string",
                     "description": "Revisions to give shorter change and commit IDs to",
                     "default": "<revsets.log>"
+                },
+                "run": {
+                    "type": "string",
+                    "description": "Default set of revisions to run a command on when no explicit revset is given for jj run",
+                    "default": "reachable(@, mutable())"
                 },
                 "simplify-parents": {
                     "type": "string",
@@ -706,7 +768,7 @@
         },
         "revset-aliases": {
             "type": "object",
-            "description": "Custom symbols/function aliases that can used in revset expressions",
+            "description": "Custom symbols/function aliases that can be used in revset expressions",
             "properties": {
                 "immutable_heads()": {
                     "type": "string",
@@ -715,23 +777,91 @@
                 }
             },
             "additionalProperties": {
-                "type": "string"
+                "oneOf": [
+                    {
+                        "type": "string"
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "definition": {
+                                "type": "string"
+                            },
+                            "doc": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "definition"
+                        ]
+                    }
+                ]
             }
         },
         "template-aliases": {
             "type": "object",
-            "description": "Custom symbols/function aliases that can used in templates",
+            "description": "Custom symbols/function aliases that can be used in templates",
             "additionalProperties": {
-                "type": "string"
+                "oneOf": [
+                    {
+                        "type": "string"
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "definition": {
+                                "type": "string"
+                            },
+                            "doc": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "definition"
+                        ]
+                    }
+                ]
             }
         },
         "aliases": {
             "type": "object",
             "description": "Custom subcommand aliases to be supported by the jj command",
             "additionalProperties": {
-                "type": "array",
-                "items": {
-                    "type": "string"
+                "oneOf": [
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "definition": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
+                            },
+                            "doc": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "definition"
+                        ]
+                    }
+                ]
+            }
+        },
+        "run": {
+            "type": "object",
+            "description": "Settings for the `jj run` command, which runs a shell command across a set of revisions.",
+            "properties": {
+                "jobs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum number of working copies (and parallel jobs) `jj run` uses. Defaults to 1. Overridden by `--jobs`."
                 }
             }
         },
@@ -897,6 +1027,15 @@
                                 "type": "boolean",
                                 "description": "Disables this tool if set to false",
                                 "default": true
+                            },
+                            "line-range-arg": {
+                                "type": "string",
+                                "description": "Argument template for changed line ranges (e.g. '--lines=$first-$last')"
+                            },
+                            "run-tool-if-zero-line-ranges": {
+                                "type": "boolean",
+                                "description": "Whether to run the tool if there are zero line ranges to format.",
+                                "default": false
                             }
                         }
                     },
@@ -1035,7 +1174,7 @@
         },
         "--when": {
             "type": "object",
-            "description": "Conditions restriction the application of the configuration",
+            "description": "Conditions restricting the application of the configuration",
             "properties": {
                 "repositories": {
                     "type": "array",

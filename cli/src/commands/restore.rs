@@ -106,7 +106,7 @@ pub(crate) async fn cmd_restore(
     command: &CommandHelper,
     args: &RestoreArgs,
 ) -> Result<(), CommandError> {
-    let mut workspace_command = command.workspace_helper(ui)?;
+    let mut workspace_command = command.workspace_helper(ui).await?;
     let (from_commits, from_tree, to_commit);
     if args.revision.is_some() {
         return Err(
@@ -202,7 +202,7 @@ pub(crate) async fn cmd_restore(
         {
             writeln!(
                 formatter,
-                "Rebased {num_rebased} descendant commits{extra_msg}"
+                "Rebased {num_rebased} descendant commits{extra_msg}."
             )?;
         }
         tx.finish(ui, format!("restore into commit {}", to_commit.id().hex()))

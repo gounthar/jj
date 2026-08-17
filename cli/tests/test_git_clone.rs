@@ -65,7 +65,7 @@ fn test_git_clone() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: uuqppmxq 3711b3b5 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
@@ -79,6 +79,14 @@ fn test_git_clone() {
     insta::assert_snapshot!(output, @"
     ------- stderr -------
     Nothing changed.
+    [EOF]
+    ");
+
+    // Evolution history should be omitted for the "clone" operation
+    let output = clone_dir.run_jj(["evolog", "-r..remote_bookmarks()"]);
+    insta::assert_snapshot!(output, @"
+    ◆  qomsplrm someone@example.org 1970-01-01 11:00:00 main ebeb70d8
+       message
     [EOF]
     ");
 
@@ -173,8 +181,8 @@ fn test_git_clone() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/nested/path/to/repo"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
-    Working copy  (@) now at: vzqnnsmr fea36bca (empty) (no description set)
+    Setting the revset alias `trunk()` to `main@origin`.
+    Working copy  (@) now at: msksykpx 5ed2b734 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
     [EOF]
@@ -254,7 +262,6 @@ fn test_git_clone_colocate() -> TestResult {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/empty"
     Nothing changed.
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
 
@@ -274,11 +281,10 @@ fn test_git_clone_colocate() -> TestResult {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: uuqppmxq 3711b3b5 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     let clone_dir = test_env.work_dir("clone");
@@ -420,11 +426,10 @@ fn test_git_clone_colocate() -> TestResult {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/nested/path/to/repo"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: vzqnnsmr fea36bca (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     Ok(())
@@ -446,11 +451,10 @@ fn test_git_clone_colocate_via_config() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: sqpuoqvx 1ca44815 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     let clone_dir = test_env.work_dir("clone");
@@ -474,7 +478,7 @@ fn test_git_clone_no_colocate() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: sqpuoqvx 1ca44815 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
@@ -486,9 +490,76 @@ fn test_git_clone_no_colocate() {
 }
 
 #[test]
-fn test_git_clone_tags() {
-    use gix::remote::fetch::Tags;
+fn test_git_clone_default_bookmarks_and_tags() {
+    let test_env = TestEnvironment::default();
+    let root_dir = test_env.work_dir("");
 
+    let source_repo = git::init(root_dir.root().join("source"));
+    git::add_commit(&source_repo, "refs/tags/tag1", "file", b"", "1a", &[]);
+    git::add_commit(&source_repo, "refs/heads/branch1", "file", b"", "1b", &[]);
+    git::add_commit(&source_repo, "refs/tags/tag2", "file", b"", "1c", &[]);
+    git::add_commit(&source_repo, "refs/heads/branch2", "file", b"", "1d", &[]);
+
+    // Per-remote default config
+    test_env.add_config(indoc! {"
+        [remotes.origin]
+        fetch-bookmarks = 'branch1'
+        fetch-tags = 'tag1'
+        [remotes.rem2]
+        fetch-bookmarks = 'branch2'
+        fetch-tags = 'tag2'
+    "});
+    let output = root_dir.run_jj(["git", "clone", "source", "local1"]);
+    insta::assert_snapshot!(output, @r#"
+    ------- stderr -------
+    Fetching into new repo in "$TEST_ENV/local1"
+    bookmark: branch1@origin [new] untracked
+    tag: tag1@origin [new] tracked
+    Working copy  (@) now at: sqpuoqvx d3619ee8 (empty) (no description set)
+    Parent commit (@-)      : sotzwqom 0e985955 branch1@origin | 1b
+    Added 1 files, modified 0 files, removed 0 files
+    [EOF]
+    "#);
+    let output = root_dir.run_jj(["git", "clone", "--remote=rem2", "source", "local2"]);
+    insta::assert_snapshot!(output, @r#"
+    ------- stderr -------
+    Fetching into new repo in "$TEST_ENV/local2"
+    bookmark: branch2@rem2 [new] untracked
+    tag: tag2@rem2 [new] tracked
+    Working copy  (@) now at: uuqppmxq 92acf2c2 (empty) (no description set)
+    Parent commit (@-)      : lqvtntpl 147076c8 branch2@rem2 | 1d
+    Added 1 files, modified 0 files, removed 0 files
+    [EOF]
+    "#);
+
+    // Default patterns shouldn't be copied to Git config. If they were, "jj git
+    // fetch" of the renamed remote would be noop.
+    let local_dir = test_env.work_dir("local2");
+    local_dir
+        .run_jj(["git", "remote", "rename", "rem2", "rem3"])
+        .success();
+    let output = local_dir.run_jj(["git", "fetch"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Hint: Fetching from the only existing remote: rem3
+    bookmark: branch1@rem3 [new] untracked
+    tag: tag1@rem3 [new] tracked
+    [EOF]
+    ");
+
+    // Default fetch-bookmarks/tags should be disabled by --branch
+    let output = root_dir.run_jj(["git", "clone", "--branch=*", "source", "local3"]);
+    insta::assert_snapshot!(output, @r#"
+    ------- stderr -------
+    Fetching into new repo in "$TEST_ENV/local3"
+    bookmark: branch1@origin [new] untracked
+    bookmark: branch2@origin [new] untracked
+    [EOF]
+    "#);
+}
+
+#[test]
+fn test_git_clone_tags() {
     let test_env = TestEnvironment::default();
     let root_dir = test_env.work_dir("");
     let git_repo_path = test_env.env_root().join("source");
@@ -524,79 +595,19 @@ fn test_git_clone_tags() {
 
     git::set_symbolic_reference(&source_git_repo, "HEAD", "refs/heads/main");
 
-    let run_test = |name, args: &[_]| {
-        // Clone an empty repo
-        root_dir.run_jj(
-            ["git", "clone", "source", name, "--colocate"]
-                .iter()
-                .chain(args),
-        )
-    };
-
-    let get_remote_fetch_tags = |name| {
-        git::open(test_env.env_root().join(name))
-            .find_remote("origin")
-            .unwrap()
-            .fetch_tags()
-    };
-
-    insta::assert_snapshot!(run_test("default", &[]), @r#"
+    let output = root_dir.run_jj(["git", "clone", "source", "default", "--colocate"]);
+    insta::assert_snapshot!(output, @r#"
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/default"
     bookmark: main@origin [new] tracked
-    tag: v1.0@git [new] 
-    tag: v2.0@git [new] 
-    Setting the revset alias `trunk()` to `main@origin`
+    tag: v1.0@origin [new] tracked
+    tag: v2.0@origin [new] tracked
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: sqpuoqvx 88542a00 (empty) (no description set)
     Parent commit (@-)      : lnmyztun e93ca54d main | message
     Added 2 files, modified 0 files, removed 0 files
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
-
-    insta::assert_snapshot!(run_test("included", &["--fetch-tags", "included"]), @r#"
-    ------- stderr -------
-    Fetching into new repo in "$TEST_ENV/included"
-    bookmark: main@origin [new] tracked
-    tag: v2.0@git [new] 
-    Setting the revset alias `trunk()` to `main@origin`
-    Working copy  (@) now at: uuqppmxq 676b2fd8 (empty) (no description set)
-    Parent commit (@-)      : lnmyztun e93ca54d main | message
-    Added 2 files, modified 0 files, removed 0 files
-    Hint: Running `git clean -xdf` will remove `.jj/`!
-    [EOF]
-    "#);
-
-    insta::assert_snapshot!(run_test("all", &["--fetch-tags", "all"]), @r#"
-    ------- stderr -------
-    Fetching into new repo in "$TEST_ENV/all"
-    bookmark: main@origin [new] tracked
-    tag: v1.0@git [new] 
-    tag: v2.0@git [new] 
-    Setting the revset alias `trunk()` to `main@origin`
-    Working copy  (@) now at: pmmvwywv cd5996a2 (empty) (no description set)
-    Parent commit (@-)      : lnmyztun e93ca54d main | message
-    Added 2 files, modified 0 files, removed 0 files
-    Hint: Running `git clean -xdf` will remove `.jj/`!
-    [EOF]
-    "#);
-
-    insta::assert_snapshot!(run_test("none", &["--fetch-tags", "none"]), @r#"
-    ------- stderr -------
-    Fetching into new repo in "$TEST_ENV/none"
-    bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
-    Working copy  (@) now at: rzvqmyuk 61c45a3c (empty) (no description set)
-    Parent commit (@-)      : lnmyztun e93ca54d main | message
-    Added 2 files, modified 0 files, removed 0 files
-    Hint: Running `git clean -xdf` will remove `.jj/`!
-    [EOF]
-    "#);
-
-    assert_eq!(Tags::Included, get_remote_fetch_tags("default"));
-    assert_eq!(Tags::Included, get_remote_fetch_tags("included"));
-    assert_eq!(Tags::All, get_remote_fetch_tags("all"));
-    assert_eq!(Tags::None, get_remote_fetch_tags("none"));
 }
 
 #[test]
@@ -625,7 +636,7 @@ fn test_git_clone_remote_default_bookmark() -> TestResult {
     Fetching into new repo in "$TEST_ENV/clone1"
     bookmark: feature1@origin [new] tracked
     bookmark: main@origin     [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: sqpuoqvx 1ca44815 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 feature1 main | message
     Added 1 files, modified 0 files, removed 0 files
@@ -655,7 +666,7 @@ fn test_git_clone_remote_default_bookmark() -> TestResult {
     Fetching into new repo in "$TEST_ENV/clone2"
     bookmark: feature1@origin [new] untracked
     bookmark: main@origin     [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: rzvqmyuk 27e56779 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 feature1@origin main | message
     Added 1 files, modified 0 files, removed 0 files
@@ -677,7 +688,7 @@ fn test_git_clone_remote_default_bookmark() -> TestResult {
     Fetching into new repo in "$TEST_ENV/clone3"
     bookmark: feature1@origin [new] tracked
     bookmark: main@origin     [new] untracked
-    Setting the revset alias `trunk()` to `feature1@origin`
+    Setting the revset alias `trunk()` to `feature1@origin`.
     Working copy  (@) now at: nppvrztz b16020e9 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 feature1 main@origin | message
     Added 1 files, modified 0 files, removed 0 files
@@ -712,7 +723,7 @@ fn test_git_clone_remote_default_bookmark() -> TestResult {
     Fetching into new repo in "$TEST_ENV/clone4"
     bookmark: feature1@origin [new] untracked
     bookmark: main@origin     [new] untracked
-    Setting the revset alias `trunk()` to `feature1@origin`
+    Setting the revset alias `trunk()` to `feature1@origin`.
     Working copy  (@) now at: wmwvqwsz 5068d576 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 feature1@origin main@origin | message
     Added 1 files, modified 0 files, removed 0 files
@@ -725,38 +736,6 @@ fn test_git_clone_remote_default_bookmark() -> TestResult {
     [EOF]
     ");
 
-    // Show hint if track-default-bookmark-on-clone=false has no effect
-    let output = root_dir.run_jj([
-        "git",
-        "clone",
-        "--config=git.auto-local-bookmark=true",
-        "--config=git.track-default-bookmark-on-clone=false",
-        "source",
-        "clone5",
-    ]);
-    insta::assert_snapshot!(output, @r#"
-    ------- stderr -------
-    Warning: Deprecated CLI-provided config: `git.auto-local-bookmark` is deprecated; use `remotes.<name>.auto-track-bookmarks` instead.
-    Example: jj config set --user remotes.origin.auto-track-bookmarks '*'
-    For details, see: https://docs.jj-vcs.dev/latest/config/#automatic-tracking-of-bookmarks
-    Fetching into new repo in "$TEST_ENV/clone5"
-    bookmark: feature1@origin [new] tracked
-    bookmark: main@origin     [new] tracked
-    Hint: `git.track-default-bookmark-on-clone=false` has no effect if `git.auto-local-bookmark` is enabled.
-    Setting the revset alias `trunk()` to `feature1@origin`
-    Working copy  (@) now at: vzqnnsmr fea36bca (empty) (no description set)
-    Parent commit (@-)      : qomsplrm ebeb70d8 feature1 main | message
-    Added 1 files, modified 0 files, removed 0 files
-    [EOF]
-    "#);
-    let clone_dir5 = test_env.work_dir("clone5");
-    insta::assert_snapshot!(get_bookmark_output(&clone_dir5), @"
-    feature1: qomsplrm ebeb70d8 message
-      @origin: qomsplrm ebeb70d8 message
-    main: qomsplrm ebeb70d8 message
-      @origin: qomsplrm ebeb70d8 message
-    [EOF]
-    ");
     Ok(())
 }
 
@@ -786,7 +765,7 @@ fn test_git_clone_remote_default_bookmark_with_escape() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: "\""@origin [new] tracked
-    Setting the revset alias `trunk()` to `"\""@origin`
+    Setting the revset alias `trunk()` to `"\""@origin`.
     Working copy  (@) now at: sqpuoqvx 1ca44815 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 "\"" | message
     Added 1 files, modified 0 files, removed 0 files
@@ -816,7 +795,7 @@ fn test_git_clone_ignore_working_copy() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     [EOF]
     "#);
     let clone_dir = test_env.work_dir("clone");
@@ -833,7 +812,7 @@ fn test_git_clone_ignore_working_copy() {
     let output = clone_dir.run_jj(["status"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Error: The working copy is stale (not updated since operation 90267f31f904).
+    Error: The working copy is stale (not updated since operation f63ee16f9553).
     Hint: Run `jj workspace update-stale` to update it.
     See https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy for more information.
     [EOF]
@@ -873,7 +852,7 @@ fn test_git_clone_with_remote_name() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: main@upstream [new] tracked
-    Setting the revset alias `trunk()` to `main@upstream`
+    Setting the revset alias `trunk()` to `main@upstream`.
     Working copy  (@) now at: sqpuoqvx 1ca44815 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
@@ -927,7 +906,7 @@ fn test_git_clone_trunk_deleted() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: sqpuoqvx 1ca44815 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
@@ -939,11 +918,6 @@ fn test_git_clone_trunk_deleted() {
     ------- stderr -------
     Forgot 1 local bookmarks.
     Forgot 1 remote bookmarks.
-    Warning: Failed to check mutability of the new working-copy revision.
-    Caused by:
-    1: Invalid `revset-aliases.immutable_heads()`
-    2: Revision `main@origin` doesn't exist
-    Hint: Use `jj config edit --repo` to adjust the `trunk()` alias.
     [EOF]
     ");
 
@@ -1020,7 +994,7 @@ fn test_git_clone_conditional_config() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/new"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: zxsnswpr 5479cd52 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
@@ -1063,7 +1037,7 @@ fn test_git_clone_with_depth() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: sqpuoqvx 1ca44815 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
@@ -1093,31 +1067,17 @@ fn test_git_clone_invalid_immutable_heads() {
     // Suppress lengthy warnings in commit summary template
     test_env.add_config("revsets.short-prefixes = ''");
 
-    // The error shouldn't be counted as an immutable working-copy commit. It
-    // should be reported.
+    // The error about the invalid immutable_heads() shouldn't be counted as an
+    // immutable working-copy commit.
     let output = root_dir.run_jj(["git", "clone", "source", "clone"]);
-    insta::assert_snapshot!(output, @r#"
+    insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Warning: Failed to check mutability of the new working-copy revision.
-    Caused by:
-    1: Invalid `revset-aliases.immutable_heads()`
-    2: Revision `unknown` doesn't exist
-    Fetching into new repo in "$TEST_ENV/clone"
-    bookmark: main@origin [new] tracked
-    Warning: Failed to check mutability of the new working-copy revision.
-    Caused by:
-    1: Invalid `revset-aliases.immutable_heads()`
-    2: Revision `unknown` doesn't exist
-    Setting the revset alias `trunk()` to `main@origin`
-    Warning: Failed to check mutability of the new working-copy revision.
-    Caused by:
-    1: Invalid `revset-aliases.immutable_heads()`
-    2: Revision `unknown` doesn't exist
-    Working copy  (@) now at: sqpuoqvx 1ca44815 (empty) (no description set)
-    Parent commit (@-)      : qomsplrm ebeb70d8 main | message
-    Added 1 files, modified 0 files, removed 0 files
+    Config error: Invalid `revset-aliases.immutable_heads()`
+    Caused by: Revision `unknown` doesn't exist
+    For help, see https://docs.jj-vcs.dev/latest/config/ or use `jj help -k config`.
     [EOF]
-    "#);
+    [exit status: 1]
+    ");
 }
 
 #[test]
@@ -1136,7 +1096,7 @@ fn test_git_clone_malformed() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Internal error: Failed to check out commit 2f4286212884d472a0b2013a961b695a144ac65c
     Caused by: Reserved path component .jj in $TEST_ENV/clone/.jj
     [EOF]
@@ -1147,7 +1107,7 @@ fn test_git_clone_malformed() {
     let output = clone_dir.run_jj(["status"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Error: The working copy is stale (not updated since operation 95b4c4e3a6ed).
+    Error: The working copy is stale (not updated since operation 68cac63e1c80).
     Hint: Run `jj workspace update-stale` to update it.
     See https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy for more information.
     [EOF]
@@ -1197,7 +1157,7 @@ fn test_git_clone_with_global_git_remote_config() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: sqpuoqvx 1ca44815 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
@@ -1248,7 +1208,7 @@ fn test_git_clone_no_git_executable_with_path() {
 }
 
 #[test]
-fn test_git_clone_branch() {
+fn test_git_clone_branch_or_tag() {
     let test_env = TestEnvironment::default();
     let root_dir = test_env.work_dir("");
     test_env.add_config("remotes.origin.auto-track-bookmarks = '*'");
@@ -1263,6 +1223,10 @@ fn test_git_clone_branch() {
         "feature1 message",
         &[],
     );
+    for name in ["tag1", "tag2", "tag3"] {
+        let full_name = format!("refs/tags/{name}");
+        git::add_commit(&git_repo, &full_name, "file", b"content", name, &[]);
+    }
 
     // Clone the default branch by name
     let output = root_dir.run_jj(["git", "clone", "source", "clone", "--branch", "main"]);
@@ -1270,10 +1234,20 @@ fn test_git_clone_branch() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
+    Setting the revset alias `trunk()` to `main@origin`.
     Working copy  (@) now at: sqpuoqvx 1ca44815 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
+    [EOF]
+    "#);
+
+    // fetch-tags should be set to "~*" because we cloned a specific branch
+    // (without fetching any tags)
+    let repo_dir = test_env.work_dir("clone");
+    insta::assert_snapshot!(repo_dir.run_jj(["config", "list", "--repo"]), @r#"
+    remotes.origin.fetch-bookmarks = "main"
+    remotes.origin.fetch-tags = "~*"
+    revset-aliases."trunk()" = "main@origin"
     [EOF]
     "#);
 
@@ -1306,7 +1280,7 @@ fn test_git_clone_branch() {
     ------- stderr -------
     Fetching into new repo in "$TEST_ENV/clone_non_default"
     bookmark: feature1@origin [new] tracked
-    Working copy  (@) now at: pmmvwywv d16a31e5 (empty) (no description set)
+    Working copy  (@) now at: rzvqmyuk 5badc4c2 (empty) (no description set)
     Parent commit (@-)      : yxwyzxtq 14835edf feature1 | feature1 message
     Added 1 files, modified 0 files, removed 0 files
     [EOF]
@@ -1321,6 +1295,39 @@ fn test_git_clone_branch() {
     [EOF]
     ");
 
+    // Clone multiple tags by name
+    let output = root_dir.run_jj([
+        "git",
+        "clone",
+        "source",
+        "clone_tags",
+        "--tag=tag1",
+        "--tag=tag2",
+    ]);
+    insta::assert_snapshot!(output, @r#"
+    ------- stderr -------
+    Fetching into new repo in "$TEST_ENV/clone_tags"
+    tag: tag1@origin [new] tracked
+    tag: tag2@origin [new] tracked
+    [EOF]
+    "#);
+
+    // fetch-tags should be set to "<name1> | <name2> | ..."
+    let repo_dir = test_env.work_dir("clone_tags");
+    insta::assert_snapshot!(repo_dir.run_jj(["config", "list", "--repo"]), @r#"
+    remotes.origin.fetch-bookmarks = "~*"
+    remotes.origin.fetch-tags = "tag1 | tag2"
+    [EOF]
+    "#);
+
+    // Perform a fetch in that same repo
+    let output = repo_dir.run_jj(["git", "fetch"]);
+    insta::assert_snapshot!(output, @"
+    ------- stderr -------
+    Nothing changed.
+    [EOF]
+    ");
+
     // Clone all branches explicitly, the default branch should be checked out
     let output = root_dir.run_jj(["git", "clone", "source", "clone_all", "--branch=*"]);
     insta::assert_snapshot!(output, @r#"
@@ -1328,34 +1335,44 @@ fn test_git_clone_branch() {
     Fetching into new repo in "$TEST_ENV/clone_all"
     bookmark: feature1@origin [new] tracked
     bookmark: main@origin     [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
-    Working copy  (@) now at: zxsnswpr 56139679 (empty) (no description set)
+    Setting the revset alias `trunk()` to `main@origin`.
+    Working copy  (@) now at: wmwvqwsz 5068d576 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
     [EOF]
     "#);
 
-    // Clone all but feature1
+    // Clone all but feature1 and tag1
     let output = root_dir.run_jj([
         "git",
         "clone",
         "source",
-        "clone_all_but_feature1",
+        "clone_all_but",
         "--branch=~feature1",
+        "--tag=~tag1",
     ]);
     insta::assert_snapshot!(output, @r#"
     ------- stderr -------
-    Fetching into new repo in "$TEST_ENV/clone_all_but_feature1"
+    Fetching into new repo in "$TEST_ENV/clone_all_but"
     bookmark: main@origin [new] tracked
-    Setting the revset alias `trunk()` to `main@origin`
-    Working copy  (@) now at: nppvrztz b16020e9 (empty) (no description set)
+    tag: tag2@origin [new] tracked
+    tag: tag3@origin [new] tracked
+    Setting the revset alias `trunk()` to `main@origin`.
+    Working copy  (@) now at: uuzqqzqu c871b515 (empty) (no description set)
     Parent commit (@-)      : qomsplrm ebeb70d8 main | message
     Added 1 files, modified 0 files, removed 0 files
     [EOF]
     "#);
 
+    let repo_dir = test_env.work_dir("clone_all_but");
+    insta::assert_snapshot!(repo_dir.run_jj(["config", "list", "--repo"]), @r#"
+    remotes.origin.fetch-bookmarks = "~feature1"
+    remotes.origin.fetch-tags = "~tag1"
+    revset-aliases."trunk()" = "main@origin"
+    [EOF]
+    "#);
+
     // Perform a fetch in that same repo
-    let repo_dir = test_env.work_dir("clone_all_but_feature1");
     let output = repo_dir.run_jj(["git", "fetch"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
@@ -1377,7 +1394,7 @@ fn test_git_clone_branch() {
     Fetching into new repo in "$TEST_ENV/clone_each"
     bookmark: feature1@origin [new] tracked
     bookmark: main@origin     [new] tracked
-    Working copy  (@) now at: nuwvvtmy 38b11a7f (empty) (no description set)
+    Working copy  (@) now at: mouksmqu 41e09dcd (empty) (no description set)
     Parent commit (@-)      : yxwyzxtq 14835edf feature1 | feature1 message
     Added 1 files, modified 0 files, removed 0 files
     [EOF]

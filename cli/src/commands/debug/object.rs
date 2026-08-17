@@ -16,17 +16,17 @@ use std::fmt::Debug;
 use std::io::Write as _;
 
 use clap::Subcommand;
+use futures::AsyncReadExt as _;
 use jj_lib::backend::CommitId;
 use jj_lib::backend::FileId;
+use jj_lib::backend::MergedTreeValue;
 use jj_lib::backend::SymlinkId;
 use jj_lib::backend::TreeId;
 use jj_lib::backend::TreeValue;
-use jj_lib::merge::MergedTreeValue;
 use jj_lib::op_store::OperationId;
 use jj_lib::op_store::ViewId;
 use jj_lib::repo_path::RepoPath;
 use jj_lib::repo_path::RepoPathBuf;
-use tokio::io::AsyncReadExt as _;
 
 use crate::cli_util::CommandHelper;
 use crate::cli_util::RevisionArg;
@@ -117,7 +117,7 @@ pub async fn cmd_debug_object(
         DebugObjectArgs::Commit(args) => {
             let id = CommitId::try_from_hex(&args.id)
                 .ok_or_else(|| user_error(format!(r#"Invalid hex commit id: "{}""#, args.id)))?;
-            let commit = repo_loader.store().get_commit(&id)?;
+            let commit = repo_loader.store().get_commit_async(&id).await?;
             writeln!(ui.stdout(), "{:#?}", commit.store_commit())?;
         }
         DebugObjectArgs::File(args) => {
@@ -185,7 +185,7 @@ pub async fn cmd_debug_object(
         }
         DebugObjectArgs::View(args) => {
             let id = if let Some(op_string) = &args.op {
-                let workspace_command = command.workspace_helper_no_snapshot(ui)?;
+                let workspace_command = command.workspace_helper_no_snapshot(ui).await?;
                 let op = workspace_command.resolve_single_op(op_string)?;
                 op.view_id().clone()
             } else {
@@ -207,7 +207,7 @@ async fn get_tree_value(
     rev: &RevisionArg,
     path: &RepoPath,
 ) -> Result<MergedTreeValue, CommandError> {
-    let workspace_command = command.workspace_helper_no_snapshot(ui)?;
+    let workspace_command = command.workspace_helper_no_snapshot(ui).await?;
     let commit = workspace_command.resolve_single_rev(ui, rev).await?;
     let tree_value = commit.tree().path_value(path).await?;
     Ok(tree_value)

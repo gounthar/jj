@@ -21,6 +21,7 @@
 
 use std::sync::Arc;
 
+use futures::TryStreamExt as _;
 use itertools::Itertools as _;
 use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
@@ -63,8 +64,10 @@ fn write_new_commit<'a>(
 }
 
 fn rebase_descendants(repo: &mut MutableRepo) -> Vec<Commit> {
+    let immutable = RevsetExpression::none();
+    let options = RebaseOptions::default();
     let mut commits = Vec::new();
-    repo.rebase_descendants_with_options(&RebaseOptions::default(), |_, rebased| match rebased {
+    repo.rebase_descendants_with_options(&immutable, &options, |_, rebased| match rebased {
         RebasedCommit::Rewritten(commit) => commits.push(commit),
         RebasedCommit::Abandoned { .. } => {}
     })
@@ -85,6 +88,7 @@ fn arb_expression(
         Just(RevsetExpression::all()),
         Just(RevsetExpression::visible_heads()),
         Just(RevsetExpression::root()),
+        Just(RevsetExpression::forks()),
         proptest::sample::subsequence(known_commits, 1..=5.min(max_commits))
             .prop_map(RevsetExpression::commits),
         // Use merges() as a filter that isn't constant. Since we don't have an
@@ -128,6 +132,8 @@ fn arb_expression(
                 expr.clone().prop_map(|x| x.roots()),
                 // ForkPoint
                 expr.clone().prop_map(|x| x.fork_point()),
+                // MergePoint
+                expr.clone().prop_map(|x| x.merge_point()),
                 // Latest
                 (expr.clone(), 0..5_usize).prop_map(|(x, n)| x.latest(n)),
                 // AtOperation (or WithinVisibility)
@@ -159,8 +165,12 @@ fn verify_optimized(
 ) -> Result<(), TestCaseError> {
     let optimized_revset = expression.clone().evaluate(repo).unwrap();
     let unoptimized_revset = expression.clone().evaluate_unoptimized(repo).unwrap();
-    let optimized_ids: Vec<_> = optimized_revset.iter().try_collect().unwrap();
-    let unoptimized_ids: Vec<_> = unoptimized_revset.iter().try_collect().unwrap();
+    let optimized_ids: Vec<_> = optimized_revset.stream().try_collect().block_on().unwrap();
+    let unoptimized_ids: Vec<_> = unoptimized_revset
+        .stream()
+        .try_collect()
+        .block_on()
+        .unwrap();
     prop_assert_eq!(optimized_ids, unoptimized_ids);
     Ok(())
 }

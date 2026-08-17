@@ -42,7 +42,7 @@ pub(crate) async fn cmd_simplify_parents(
     command: &CommandHelper,
     args: &SimplifyParentsArgs,
 ) -> Result<(), CommandError> {
-    let mut workspace_command = command.workspace_helper(ui)?;
+    let mut workspace_command = command.workspace_helper(ui).await?;
     let revs = if args.source.is_empty() && args.revisions.is_empty() {
         let revs = workspace_command
             .settings()
@@ -83,6 +83,7 @@ pub(crate) async fn cmd_simplify_parents(
                 // the error does not come from `Backend`, but `Index`.
                 rewriter
                     .simplify_ancestor_merge()
+                    .await
                     .map_err(|err| BackendError::Other(err.into()))?;
             }
             let num_new_heads = rewriter.new_parents().len();
@@ -111,7 +112,7 @@ pub(crate) async fn cmd_simplify_parents(
         if reparented_descendants > 0 {
             writeln!(
                 formatter,
-                "Rebased {reparented_descendants} descendant commits",
+                "Rebased {reparented_descendants} descendant commits.",
             )?;
         }
     }

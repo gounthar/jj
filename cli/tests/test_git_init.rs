@@ -115,6 +115,24 @@ fn test_git_init_internal_preexisting_git_repo() {
 }
 
 #[test]
+fn test_git_init_internal_no_integrate_operation() {
+    let test_env = TestEnvironment::default();
+    let workspace_root = test_env.env_root().join("repo");
+    std::fs::create_dir(&workspace_root).unwrap();
+
+    let output = test_env.run_jj_in(
+        &workspace_root,
+        &["git", "init", "--no-integrate-operation"],
+    );
+    insta::assert_snapshot!(output, @r"
+    ------- stderr -------
+    Error: --no-integrate-operation is not respected
+    [EOF]
+    [exit status: 2]
+    ");
+}
+
+#[test]
 fn test_git_init_ignore_working_copy() {
     let test_env = TestEnvironment::default();
     test_env.add_config("git.colocate = true");
@@ -174,7 +192,6 @@ fn test_git_init_external(bare: bool) {
     Parent commit (@-)      : nntyzxmz e80a42cc my-bookmark | My commit message
     Added 1 files, modified 0 files, removed 0 files
     Initialized repo in "repo"
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     }
@@ -239,10 +256,18 @@ fn test_git_init_external_with_colocate_config() {
     Parent commit (@-)      : nntyzxmz e80a42cc my-bookmark | My commit message
     Added 1 files, modified 0 files, removed 0 files
     Initialized repo in "repo"
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     }
+
+    // Evolution history should be omitted for the "init" operation
+    let work_dir = test_env.work_dir("repo");
+    let output = work_dir.run_jj(["evolog", "-r..remote_bookmarks(remote=git)"]);
+    insta::assert_snapshot!(output, @"
+    ○  nntyzxmz someone@example.org 1970-01-01 11:00:00 my-bookmark e80a42cc
+       My commit message
+    [EOF]
+    ");
 }
 
 #[test_case(false; "full")]
@@ -285,12 +310,11 @@ fn test_git_init_external_import_trunk(bare: bool) -> TestResult {
     insta::assert_snapshot!(output, @r#"
     ------- stderr -------
     Done importing changes from the underlying Git repo.
-    Setting the revset alias `trunk()` to `trunk@origin`
+    Setting the revset alias `trunk()` to `trunk@origin`.
     Working copy  (@) now at: sqpuoqvx ed6b5138 (empty) (no description set)
     Parent commit (@-)      : nntyzxmz e80a42cc my-bookmark trunk@origin | My commit message
     Added 1 files, modified 0 files, removed 0 files
     Initialized repo in "repo"
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     }
@@ -362,12 +386,11 @@ fn test_git_init_external_import_trunk_upstream_takes_precedence() -> TestResult
     insta::assert_snapshot!(output, @r#"
     ------- stderr -------
     Done importing changes from the underlying Git repo.
-    Setting the revset alias `trunk()` to `develop@upstream`
+    Setting the revset alias `trunk()` to `develop@upstream`.
     Working copy  (@) now at: sqpuoqvx ed6b5138 (empty) (no description set)
     Parent commit (@-)      : nntyzxmz e80a42cc develop@upstream my-bookmark trunk@origin | My commit message
     Added 1 files, modified 0 files, removed 0 files
     Initialized repo in "repo"
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     }
@@ -430,7 +453,6 @@ fn test_git_init_colocated_via_git_repo_path() {
     ------- stderr -------
     Done importing changes from the underlying Git repo.
     Initialized repo in "."
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
 
@@ -493,7 +515,6 @@ fn test_git_init_colocated_via_git_repo_path_gitlink() {
     ------- stderr -------
     Done importing changes from the underlying Git repo.
     Initialized repo in "."
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     insta::assert_snapshot!(read_git_target(&jj_work_dir), @"../../../.git");
@@ -542,7 +563,6 @@ fn test_git_init_colocated_via_git_repo_path_symlink_directory() -> TestResult {
     ------- stderr -------
     Done importing changes from the underlying Git repo.
     Initialized repo in "."
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     insta::assert_snapshot!(read_git_target(&jj_work_dir), @"../../../.git");
@@ -597,7 +617,6 @@ fn test_git_init_colocated_via_git_repo_path_symlink_directory_without_bare_conf
     ------- stderr -------
     Done importing changes from the underlying Git repo.
     Initialized repo in "."
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     insta::assert_snapshot!(read_git_target(&jj_work_dir), @"../../../.git");
@@ -654,7 +673,6 @@ fn test_git_init_colocated_via_git_repo_path_symlink_gitlink() -> TestResult {
     ------- stderr -------
     Done importing changes from the underlying Git repo.
     Initialized repo in "."
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     insta::assert_snapshot!(read_git_target(&jj_work_dir), @"../../../.git");
@@ -732,7 +750,6 @@ fn test_git_init_colocated_via_git_repo_path_imported_refs() {
     ------- stderr -------
     Done importing changes from the underlying Git repo.
     Initialized repo in "."
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     insta::assert_snapshot!(get_bookmark_output(&local_dir), @"
@@ -756,9 +773,8 @@ fn test_git_init_colocated_via_git_repo_path_imported_refs() {
     Hint: The following remote bookmarks aren't associated with the existing local bookmarks:
       local-remote@origin
     Hint: Run the following command to keep local bookmarks updated on future pulls:
-      jj bookmark track local-remote --remote=origin
+      jj bookmark track local-remote@origin
     Initialized repo in "."
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     insta::assert_snapshot!(get_bookmark_output(&local_dir), @"
@@ -812,7 +828,6 @@ fn test_git_init_colocated_dirty_working_copy() {
     ------- stderr -------
     Done importing changes from the underlying Git repo.
     Initialized repo in "."
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
 
@@ -893,7 +908,6 @@ fn test_git_init_external_but_git_dir_exists() {
     insta::assert_snapshot!(output, @r#"
     ------- stderr -------
     Initialized repo in "."
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
 
@@ -931,7 +945,6 @@ fn test_git_init_colocated_via_flag_git_dir_exists() {
     ------- stderr -------
     Done importing changes from the underlying Git repo.
     Initialized repo in "repo"
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
 
@@ -977,7 +990,6 @@ fn test_git_init_colocated_via_config_git_dir_exists() {
     ------- stderr -------
     Done importing changes from the underlying Git repo.
     Initialized repo in "repo"
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
 
@@ -1057,7 +1069,6 @@ fn test_git_init_colocated_via_flag_overrides_false_config() {
     ------- stderr -------
     Done importing changes from the underlying Git repo.
     Initialized repo in "repo"
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
 
@@ -1083,7 +1094,6 @@ fn test_git_init_colocated_via_flag_git_dir_not_exists() {
     insta::assert_snapshot!(output, @r#"
     ------- stderr -------
     Initialized repo in "repo"
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     // No HEAD ref is available yet
@@ -1170,7 +1180,6 @@ fn test_git_init_conditional_config() {
     insta::assert_snapshot!(output.normalize_backslash(), @r#"
     ------- stderr -------
     Initialized repo in "../new"
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
     run_jj(&new_workspace_dir, &["new"]).success();
@@ -1309,7 +1318,6 @@ fn test_git_init_colocate_gitlink_not_worktree() -> TestResult {
     ------- stderr -------
     Done importing changes from the underlying Git repo.
     Initialized repo in "."
-    Hint: Running `git clean -xdf` will remove `.jj/`!
     [EOF]
     "#);
 

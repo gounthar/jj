@@ -67,7 +67,7 @@ pub async fn cmd_sign(
     command: &CommandHelper,
     args: &SignArgs,
 ) -> Result<(), CommandError> {
-    let mut workspace_command = command.workspace_helper(ui)?;
+    let mut workspace_command = command.workspace_helper(ui).await?;
 
     if !workspace_command.repo().store().signer().can_sign() {
         return Err(user_error(
@@ -156,12 +156,12 @@ pub async fn cmd_sign(
     if num_not_authored_by_me > 0 {
         writeln!(
             ui.warning_default(),
-            "{num_not_authored_by_me} of these commits are not authored by you",
+            "{num_not_authored_by_me} of these commits are not authored by you.",
         )?;
     }
 
     if num_reparented > 0 {
-        writeln!(ui.status(), "Rebased {num_reparented} descendant commits")?;
+        writeln!(ui.status(), "Rebased {num_reparented} descendant commits.")?;
     }
 
     let transaction_description = match &*signed_commits {

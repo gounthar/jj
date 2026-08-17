@@ -16,9 +16,9 @@ use std::fmt::Debug;
 use std::io::Write as _;
 
 use jj_lib::backend::BackendResult;
+use jj_lib::backend::MergedTreeValue;
 use jj_lib::backend::TreeId;
 use jj_lib::merge::Merge;
-use jj_lib::merge::MergedTreeValue;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
 
@@ -50,7 +50,7 @@ pub async fn cmd_debug_tree(
     command: &CommandHelper,
     args: &DebugTreeArgs,
 ) -> Result<(), CommandError> {
-    let workspace_command = command.workspace_helper(ui)?;
+    let workspace_command = command.workspace_helper(ui).await?;
     let matcher = workspace_command
         .parse_file_patterns(ui, &args.paths)?
         .to_matcher();

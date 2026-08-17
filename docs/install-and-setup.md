@@ -111,6 +111,16 @@ emerge -av dev-vcs/jj
 zypper install jujutsu
 ```
 
+#### Fedora Linux
+
+`jujutsu` has an unofficial [COPR
+repo](https://copr.fedorainfracloud.org/coprs/aldantanneo/jj-vcs) for Fedora:
+
+```shell
+sudo dnf copr enable aldantanneo/jj-vcs
+sudo dnf install jj-cli
+```
+
 ### Mac
 
 #### From Source
@@ -183,6 +193,24 @@ via scoop:
 ```shell
 # To install the latest release via scoop
 scoop install main/jj
+```
+
+### FreeBSD
+
+`devel/jujutsu` is [available](https://www.freshports.org/devel/jujutsu) in the ports.
+
+Install pre-built pkg:
+
+```shell
+# To install the latest release via pkg
+pkg install jujutsu
+```
+
+Install from building the port:
+
+```shell
+# To install the latest release via ports
+cd /usr/ports/devel/jujutsu/ && make install clean
 ```
 
 ## Runtime Requirements

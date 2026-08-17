@@ -94,7 +94,7 @@ pub(crate) async fn cmd_diffedit(
     command: &CommandHelper,
     args: &DiffeditArgs,
 ) -> Result<(), CommandError> {
-    let mut workspace_command = command.workspace_helper(ui)?;
+    let mut workspace_command = command.workspace_helper(ui).await?;
     let fileset_expression = workspace_command.parse_file_patterns(ui, &args.paths)?;
     let matcher = fileset_expression.to_matcher();
 
@@ -165,7 +165,7 @@ don't make any changes, then the operation will be aborted.",
         {
             writeln!(
                 formatter,
-                "Rebased {num_rebased} descendant commits{extra_msg}"
+                "Rebased {num_rebased} descendant commits{extra_msg}."
             )?;
         }
         tx.finish(ui, format!("edit commit {}", target_commit.id().hex()))

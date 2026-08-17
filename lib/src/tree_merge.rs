@@ -21,25 +21,25 @@ use std::iter::zip;
 use std::sync::Arc;
 use std::vec;
 
+use futures::AsyncReadExt as _;
 use futures::FutureExt as _;
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use futures::future::try_join_all;
 use futures::stream::FuturesUnordered;
 use itertools::Itertools as _;
-use tokio::io::AsyncReadExt as _;
 
 use crate::backend;
 use crate::backend::BackendError;
 use crate::backend::BackendResult;
+use crate::backend::MergedTreeVal;
+use crate::backend::MergedTreeValue;
 use crate::backend::TreeId;
 use crate::backend::TreeValue;
 use crate::config::ConfigGetError;
 use crate::files;
 use crate::files::FileMergeHunkLevel;
 use crate::merge::Merge;
-use crate::merge::MergedTreeVal;
-use crate::merge::MergedTreeValue;
 use crate::merge::SameChange;
 use crate::merged_tree::all_merged_tree_entries;
 use crate::object_id::ObjectId as _;

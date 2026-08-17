@@ -64,6 +64,7 @@ fn test_log_with_no_template() {
     - builtin_op_log_node_ascii
     - builtin_op_log_oneline
     - builtin_op_log_redacted
+    - builtin_workspace_list
     - commit_summary_separator
     - default_commit_description
     - description_placeholder
@@ -809,6 +810,59 @@ fn test_log_prefix_highlight_counts_hidden_commits() {
 }
 
 #[test]
+fn test_log_graph_prioritize_hidden_commits() {
+    let test_env = TestEnvironment::default();
+    test_env.run_jj_in(".", ["git", "init", "repo"]).success();
+    let work_dir = test_env.work_dir("repo");
+
+    work_dir.run_jj(["describe", "-m1"]).success();
+    work_dir.run_jj(["describe", "-m2"]).success();
+
+    // Sanity check: the revision "1" should be displayed first
+    let output = work_dir.run_jj([
+        "log",
+        "--config=revsets.log-graph-prioritize=at_operation(@-, @)",
+        "-r::(@|at_operation(@-, @))",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ○  qpvuntsm/1 test.user@example.com 2001-02-03 08:05:08 884fe9b9 (hidden)
+    │  (empty) 1
+    │ @  qpvuntsm test.user@example.com 2001-02-03 08:05:09 4e123bae
+    ├─╯  (empty) 2
+    ◆  zzzzzzzz root() 00000000
+    [EOF]
+    ");
+
+    // The revision "1" shouldn't be prioritized because it isn't included in
+    // the query.
+    let output = work_dir.run_jj([
+        "log",
+        "--config=revsets.log-graph-prioritize=at_operation(@-, @ | subject(1))",
+        "-rall()",
+    ]);
+    insta::assert_snapshot!(output, @"
+    @  qpvuntsm test.user@example.com 2001-02-03 08:05:09 4e123bae
+    │  (empty) 2
+    ◆  zzzzzzzz root() 00000000
+    [EOF]
+    ");
+
+    // The revision "2" shouldn't be prioritized because it isn't included in
+    // the query.
+    let output = work_dir.run_jj([
+        "log",
+        "--config=revsets.log-graph-prioritize=@ | subject(2)",
+        "-rat_operation(@-, all())",
+    ]);
+    insta::assert_snapshot!(output, @"
+    ○  qpvuntsm/1 test.user@example.com 2001-02-03 08:05:08 884fe9b9 (hidden)
+    │  (empty) 1
+    ◆  zzzzzzzz root() 00000000
+    [EOF]
+    ");
+}
+
+#[test]
 fn test_log_author_format() {
     let test_env = TestEnvironment::default();
     test_env.run_jj_in(".", ["git", "init", "repo"]).success();
@@ -1164,6 +1218,15 @@ fn test_default_revset() {
 
     work_dir.write_file("file1", "foo\n");
     work_dir.run_jj(["describe", "-m", "add a file"]).success();
+
+    // The built-in default log revset can be composed with other revsets.
+    insta::assert_snapshot!(
+        work_dir.run_jj(["log", "-r", "builtin_log() & @", "-T", "description"]), @"
+    @  add a file
+    │
+    ~
+    [EOF]
+    ");
 
     // Set configuration to only show the root commit.
     test_env.add_config(r#"revsets.log = "root()""#);

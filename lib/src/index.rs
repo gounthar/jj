@@ -65,7 +65,7 @@ pub type IndexResult<T> = Result<T, IndexError>;
 
 /// Defines the interface for types that provide persistent storage for an
 /// index.
-#[async_trait]
+#[async_trait(?Send)]
 pub trait IndexStore: Any + Send + Sync + Debug {
     /// Returns a name representing the type of index that the `IndexStore` is
     /// compatible with. For example, the `IndexStore` for the default index
@@ -97,6 +97,7 @@ impl dyn IndexStore {
 
 /// Defines the interface for types that provide an index of the commits in a
 /// repository by [`CommitId`].
+#[async_trait]
 pub trait Index: Send + Sync {
     /// Returns the minimum prefix length to disambiguate `commit_id` from other
     /// commits in the index. The length returned is the number of hexadecimal
@@ -104,27 +105,38 @@ pub trait Index: Send + Sync {
     ///
     /// If the given `commit_id` doesn't exist, returns the minimum prefix
     /// length which matches none of the commits in the index.
-    fn shortest_unique_commit_id_prefix_len(&self, commit_id: &CommitId) -> IndexResult<usize>;
+    async fn shortest_unique_commit_id_prefix_len(
+        &self,
+        commit_id: &CommitId,
+    ) -> IndexResult<usize>;
 
     /// Searches the index for commit IDs matching `prefix`. Returns a
     /// [`PrefixResolution`] with a [`CommitId`] if the prefix matches a single
     /// commit.
-    fn resolve_commit_id_prefix(
+    async fn resolve_commit_id_prefix(
         &self,
         prefix: &HexPrefix,
     ) -> IndexResult<PrefixResolution<CommitId>>;
 
     /// Returns true if `commit_id` is present in the index.
-    fn has_id(&self, commit_id: &CommitId) -> IndexResult<bool>;
+    async fn has_id(&self, commit_id: &CommitId) -> IndexResult<bool>;
 
     /// Returns true if `ancestor_id` commit is an ancestor of the
     /// `descendant_id` commit, or if `ancestor_id` equals `descendant_id`.
-    fn is_ancestor(&self, ancestor_id: &CommitId, descendant_id: &CommitId) -> IndexResult<bool>;
+    async fn is_ancestor(
+        &self,
+        ancestor_id: &CommitId,
+        descendant_id: &CommitId,
+    ) -> IndexResult<bool>;
 
     /// Returns the best common ancestor or ancestors of the commits in `set1`
     /// and `set2`. A "best common ancestor" has no descendants that are also
     /// common ancestors.
-    fn common_ancestors(&self, set1: &[CommitId], set2: &[CommitId]) -> IndexResult<Vec<CommitId>>;
+    async fn common_ancestors(
+        &self,
+        set1: &[CommitId],
+        set2: &[CommitId],
+    ) -> IndexResult<Vec<CommitId>>;
 
     /// Heads among all indexed commits at the associated operation.
     ///
@@ -138,11 +150,14 @@ pub trait Index: Send + Sync {
     /// Returns the subset of commit IDs in `candidates` which are not ancestors
     /// of other commits in `candidates`. If a commit id is duplicated in the
     /// `candidates` list it will appear at most once in the output.
-    fn heads(&self, candidates: &mut dyn Iterator<Item = &CommitId>) -> IndexResult<Vec<CommitId>>;
+    async fn heads(
+        &self,
+        candidates: &mut (dyn Iterator<Item = &CommitId> + Send),
+    ) -> IndexResult<Vec<CommitId>>;
 
     /// Returns iterator over paths changed at the specified commit. The paths
     /// are sorted. Returns `None` if the commit wasn't indexed.
-    fn changed_paths_in_commit(
+    async fn changed_paths_in_commit(
         &self,
         commit_id: &CommitId,
     ) -> IndexResult<Option<Box<dyn Iterator<Item = RepoPathBuf> + '_>>>;
@@ -275,9 +290,10 @@ impl ResolvedChangeTargets {
 
 /// Defines the interface for types that provide an index of the commits in a
 /// repository by [`ChangeId`].
+#[async_trait]
 pub trait ChangeIdIndex: Send + Sync {
     /// Resolve an unambiguous change ID prefix to the commit IDs in the index.
-    fn resolve_prefix(
+    async fn resolve_prefix(
         &self,
         prefix: &HexPrefix,
     ) -> IndexResult<PrefixResolution<ResolvedChangeTargets>>;
@@ -296,5 +312,5 @@ pub trait ChangeIdIndex: Send + Sync {
     ///   order to disambiguate, you need every letter of the key *and* the
     ///   additional fact that it's the entire key). This case is extremely
     ///   unlikely for hashes with 12+ hexadecimal characters.
-    fn shortest_unique_prefix_len(&self, change_id: &ChangeId) -> IndexResult<usize>;
+    async fn shortest_unique_prefix_len(&self, change_id: &ChangeId) -> IndexResult<usize>;
 }
